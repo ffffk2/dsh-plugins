@@ -28,7 +28,6 @@ credentials.yaml
 .env.*
 sessions/
 token-usage/
-rewind/
 
 # 本机调试脚本（临时抽取官方源码、探针等）
 .tools/

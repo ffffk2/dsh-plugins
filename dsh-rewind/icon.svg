@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Conversation rewind">
-  <rect x="6" y="6" width="52" height="52" rx="14" fill="#b4530a" />
-  <path d="M22 24h13a10 10 0 0 1 0 20H26" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" />
-  <path d="M27 17l-7 7 7 7" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
-  <circle cx="26" cy="44" r="3.4" fill="#ffffff" />
-</svg>
