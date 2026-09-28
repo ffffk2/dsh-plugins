@@ -1,0 +1,7 @@
+# 统一行尾：仓库与工作区都用 LF（插件是跨平台 JS，避免 CRLF 混入）
+* text=auto eol=lf
+
+# 二进制资源不要做换行转换
+*.png binary
+*.jpg binary
+*.ico binary

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Token Usage",
+    "description": "Accumulate model token usage globally, by model, and by day."
+  }
+}

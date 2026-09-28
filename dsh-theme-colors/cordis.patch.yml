@@ -1,0 +1,7 @@
+# 外观颜色 bundle 的 patch 层：插入本包唯一的 Host 行。
+# Client 模块是从 Host Loader 的条目扫描出来的，所以必须有这一行，
+# 设置页（设置 → 外观颜色）才会被 Web 端加载。
+# 本插件不需要 config：配色存在浏览器 localStorage 里。
+- insert:
+    - id: theme-colors
+      name: '@local/dsh-theme-colors'

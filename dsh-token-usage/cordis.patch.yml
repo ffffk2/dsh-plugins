@@ -1,0 +1,11 @@
+# Token 统计 bundle 的 patch 层：插入本包唯一的 Host 行。
+# config 没有 Config schema 校验，Host 半会自己补默认值：
+#   persistPath        落盘路径，默认 $DSH_HOME/token-usage/usage.json
+#   countInternalCalls 是否也统计压缩、会话标题这类内部调用，默认 true
+#   flushDelayMs       落盘防抖毫秒数，默认 2000
+- insert:
+    - id: token-usage
+      name: '@local/dsh-token-usage'
+      config:
+        countInternalCalls: true
+        flushDelayMs: 2000

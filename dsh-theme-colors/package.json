@@ -1,0 +1,40 @@
+{
+  "name": "@local/dsh-theme-colors",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "自定义 DSH 深色模式配色：主背景、侧栏、卡片、文字、强调色与分隔线",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "外观颜色",
+    "description": "用取色器自由调整深色模式的关键配色，改动立即生效。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  }
+}

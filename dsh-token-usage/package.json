@@ -1,0 +1,39 @@
+{
+  "name": "@local/dsh-token-usage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "累计记录每次模型调用的 token 用量，并在设置面板提供统计页",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "Token 统计",
+    "description": "累计记录模型 token 用量：全局、按模型、按天。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  }
+}
