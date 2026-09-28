@@ -17,3 +17,14 @@ npm-debug.log*
 pnpm-debug.log*
 *.tmp
 tmp/
+
+# AI 代理的本地工作手册：只存在本机，不对外发布
+AGENTS.md
+
+# 本机凭据与运行数据（永不入库）
+.credentials.yaml
+credentials.yaml
+.env
+.env.*
+sessions/
+token-usage/
