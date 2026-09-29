@@ -97,7 +97,7 @@ window.__ModuleLoader__.load({
       current: '当前',
       checkout: '切换',
       createBranch: '新建分支',
-      newBranchPlaceholder: '新分支名',
+      newBranchPlaceholder: '新分支名（空格自动变 -）',
       startPoint: '起点分支',
       startPointHead: '当前 HEAD',
       merge: '合并到当前分支',
@@ -204,7 +204,7 @@ window.__ModuleLoader__.load({
       current: 'current',
       checkout: 'Checkout',
       createBranch: 'New branch',
-      newBranchPlaceholder: 'New branch name',
+      newBranchPlaceholder: 'New branch name (spaces become -)',
       startPoint: 'Start point',
       startPointHead: 'Current HEAD',
       merge: 'Merge into current branch',
@@ -441,6 +441,22 @@ window.__ModuleLoader__.load({
       const date = new Date(value)
       if (Number.isNaN(date.getTime())) return value
       return date.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    }
+
+    /**
+     * 把用户手写的分支名整理成 git 认得的形态：空白换成中划线，并折叠连续的中划线。
+     *
+     * 出现的场合是「输入框 onChange」，所以必须逐字符幂等——用户按一次空格就立刻看到
+     * 一个 `-`，继续按也只是保持一个 `-`，不会出现「删掉一个中划线、光标却被吞字符」的错位。
+     * 只动空白与中划线，不碰 `/`（feature/x 这类分层名是合法且常用的）、`_`、`.` 和中文，
+     * 非法字符交给 git 自己报错，免得把用户的名字悄悄改成别的东西。
+     * @param value - 输入框当前内容。
+     * @returns 规范化后的分支名。
+     */
+    function sanitizeBranchName(value) {
+      return String(value ?? '')
+        .replace(/\s+/g, '-')
+        .replace(/-{2,}/g, '-')
     }
 
     /**
@@ -1035,11 +1051,15 @@ window.__ModuleLoader__.load({
        *
        * 收起表单 = 卸载那个 autoFocus 的输入框（或承载焦点的「创建」按钮），
        * 所以必须先 releaseFocus，否则焦点会掉进面板容器里，整个应用都打不了字。
-       * @param name - 新分支名。
+       *
+       * 名字在这里再 sanitize 一次：输入框的 onChange 已经做过，但这条路径也是唯一的落库口，
+       * 兜一层才不会因为新增调用方（快捷键、历史补全）而漏掉转换。
+       * @param rawName - 用户输入的新分支名。
        * @param startPoint - 起点分支；空串表示当前 HEAD。
        */
       const createBranch = React.useCallback(
-        async (name, startPoint) => {
+        async (rawName, startPoint) => {
+          const name = sanitizeBranchName(rawName).trim()
           if (name === '') return
           releaseFocus(rootRef)
           const result = await run('create-branch', { name, startPoint }, null)
@@ -1446,7 +1466,7 @@ window.__ModuleLoader__.load({
                   placeholder: t('newBranchPlaceholder'),
                   'aria-label': t('newBranchPlaceholder'),
                   autoFocus: true,
-                  onChange: (event) => setNewBranch({ ...newBranch, name: event.target.value }),
+                  onChange: (event) => setNewBranch({ ...newBranch, name: sanitizeBranchName(event.target.value) }),
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' && newBranch.name.trim() !== '') {
                       void createBranch(newBranch.name.trim(), newBranch.startPoint)

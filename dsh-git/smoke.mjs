@@ -861,11 +861,25 @@ group('面板渲染')
     // 填分支名
     const nameInput = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'newBranchPlaceholder')
     expect('找得到分支名输入框', nameInput !== undefined)
-    nameInput?.handler({ target: { value: 'feat/new-one' } })
+
+    // 空格自动转中划线：先喂一个带空格（含连续空格）的名字，
+    // 断言输入框当场显示的就是规范化后的值——用户所见即最终分支名，不必等提交才知道。
+    nameInput?.handler({ target: { value: 'feat  my  branch' } })
     for (let round = 0; round < 3; round += 1) {
       instance.rerender(hostProps('D:/demo'))
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
+    const spacedInput = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'newBranchPlaceholder')
+    expect('输入框里空格已变成中划线', spacedInput?.attrs?.value === 'feat-my-branch', JSON.stringify(spacedInput?.attrs?.value))
+    expect('折叠掉连续中划线', String(spacedInput?.attrs?.value ?? '').includes('--') !== true, spacedInput?.attrs?.value)
+    // 普通字符不受影响：斜杠是分层分支名的合法组成，不能被误伤。
+    spacedInput?.handler({ target: { value: 'feat/new-one' } })
+    for (let round = 0; round < 3; round += 1) {
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const restoredInput = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'newBranchPlaceholder')
+    expect('斜杠没有被误伤', restoredInput?.attrs?.value === 'feat/new-one', restoredInput?.attrs?.value)
 
     // 选起点（远程分支）
     const sourceSelect = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'startPoint')
