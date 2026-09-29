@@ -6,7 +6,7 @@ DSH（DeepSeek Harness）插件集合。每个插件都是独立的 npm 包，�
 | 插件 | 作用 | 入口 |
 |---|---|---|
 | [dsh-theme-colors](dsh-theme-colors) | 用取色器自定义深色模式配色，内置 7 套预设，改动立即生效 | 设置 → 外观颜色 |
-| [dsh-token-usage](dsh-token-usage) | 累计记录每次模型调用的 token 用量（全局 / 按模型 / 按天） | 设置 → Token 统计 |
+| [dsh-token-usage](dsh-token-usage) | 累计记录每次模型调用的 token 用量（全局 / 按模型 / 按天），可设置单价估算费用 | 设置 → Token 统计 |
 
 ## 安装
 

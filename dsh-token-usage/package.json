@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "累计记录每次模型调用的 token 用量，并在设置面板提供统计页",
+  "description": "累计记录每次模型调用的 token 用量并估算费用，在设置面板提供统计页",
   "license": "MIT",
   "exports": {
     ".": "./index.js",
@@ -14,7 +14,7 @@
   "icon": "./icon.svg",
   "meta": {
     "title": "Token 统计",
-    "description": "累计记录模型 token 用量：全局、按模型、按天。"
+    "description": "累计记录模型 token 用量：全局、按模型、按天；填好单价还能估算费用。"
   },
   "files": [
     "index.js",

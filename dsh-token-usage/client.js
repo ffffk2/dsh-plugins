@@ -4,11 +4,13 @@
  * 设置面板里的一个 `settings.section` 页面，做成仪表盘：
  *   ① 主视觉：总 Token（渐变数字 + 滚动动画）+ 缓存命中率圆环
  *   ② 构成条：输入 / 输出 / 缓存命中（+ 缓存写入、推理，有值才出现）堆叠占比
- *   ③ 趋势图：近 7 / 14 / 30 天柱状图，逐根生长动画，悬停看具体数值
- *   ④ 按模型表：列自适应（全为 0 的列不出现）+ 每行占比条
- *   ⑤ 按天表：默认 7 行，可展开到全部
+ *   ③ 费用卡：总费用（¥）+ 已定价模型数 + 单价编辑表
+ *   ④ 趋势图：近 7 / 14 / 30 天柱状图，逐根生长动画，悬停看具体数值
+ *   ⑤ 按模型表：列自适应（全为 0 的列不出现）+ 每行占比条 + 该模型费用
+ *   ⑥ 按天表：默认 7 行，可展开到全部
  *
- * 数据来自同包 Host 半的 GET /token-usage/stats；清零走 POST /token-usage/reset。
+ * 数据来自同包 Host 半的 GET /token-usage/stats；清零走 POST /token-usage/reset；
+ * 单价读写走 GET/POST /token-usage/prices。
  * 只用宿主主题 token（--dsw-alias-*）着色，不引入任何 Harness Client 包。
  */
 window.__ModuleLoader__.load({
@@ -20,7 +22,17 @@ window.__ModuleLoader__.load({
     const NS = 'token-usage'
     const STATS_PATH = '/token-usage/stats'
     const RESET_PATH = '/token-usage/reset'
+    const PRICES_PATH = '/token-usage/prices'
     const RINGS = { size: 88, radius: 34, width: 8 }
+    /** 单价单位：人民币元 / 百万 token（与 Host 半一致）。 */
+    const PER_TOKENS = 1_000_000
+    /** 计费项顺序，zh/en 的 label 键与 Host 返回的 cost.items 字段同名。 */
+    const PRICE_FIELDS = [
+      { field: 'input', label: 'input' },
+      { field: 'output', label: 'output' },
+      { field: 'cacheRead', label: 'cacheRead' },
+      { field: 'cacheWrite', label: 'cacheWrite' },
+    ]
 
     const zh = {
       nav: 'Token 统计',
@@ -45,7 +57,7 @@ window.__ModuleLoader__.load({
       share: '占比',
       refresh: '刷新',
       reset: '清零',
-      confirmReset: '确定清零累计统计吗？此操作不可撤销。',
+      confirmReset: '确定清零累计统计吗？此操作不可撤销。单价设置会保留。',
       loading: '加载中…',
       empty: '暂无记录。发出任意一次模型对话后回到这里即可看到累计。',
       file: '数据文件',
@@ -54,6 +66,39 @@ window.__ModuleLoader__.load({
       failed: '读取失败：',
       expand: '展开全部',
       collapse: '收起',
+      cost: '费用',
+      costTitle: '费用估算',
+      totalCost: '总费用',
+      costNote: '按你在下方填写的单价估算，仅供参考；未定价的模型不计入。',
+      priced: '已定价',
+      unpriced: '未定价',
+      partialPrice: '单价不全',
+      priceTitle: '模型单价',
+      priceHint: '单位：元 / 百万 token。留空表示不计算该项，全部留空即该模型不计费。',
+      priceUnit: '/ 百万 token',
+      save: '保存单价',
+      saving: '保存中…',
+      saved: '单价已保存',
+      resetPrices: '清空单价',
+      confirmResetPrices: '确定清空所有模型单价吗？',
+      priceInput: '输入单价',
+      priceOutput: '输出单价',
+      priceCacheRead: '缓存命中单价',
+      priceCacheWrite: '缓存写入单价',
+      costInput: '输入费用',
+      costOutput: '输出费用',
+      costCacheRead: '缓存命中费用',
+      costCacheWrite: '缓存写入费用',
+      priceEmpty: '还没有任何模型记录。先发起一次对话，这里就能给模型填单价了。',
+      priceDirty: '有未保存的修改',
+      priceSavedAt: '单价更新于',
+      corruptBackup: '上次启动时累计文件损坏，已备份到',
+      restoredFrom: '已从快照恢复累计：',
+      resetBackup: '清零前的数据已快照保存：',
+      resetDone: '已清零',
+      staleTitle: '正在运行的是旧版插件代码',
+      staleHint: '磁盘上的 index.js 已更新，但 DSH 仍在使用启动时加载的版本（Node 会缓存已导入的模块）。请完全退出并重启 DSH Desktop，否则新功能不会生效。',
+      build: '代码版本',
     }
 
     const en = {
@@ -79,7 +124,7 @@ window.__ModuleLoader__.load({
       share: 'Share',
       refresh: 'Refresh',
       reset: 'Reset',
-      confirmReset: 'Reset all accumulated token usage? This cannot be undone.',
+      confirmReset: 'Reset all accumulated token usage? This cannot be undone. Your prices are kept.',
       loading: 'Loading…',
       empty: 'No records yet. Send one model message and come back.',
       file: 'Data file',
@@ -88,6 +133,39 @@ window.__ModuleLoader__.load({
       failed: 'Load failed: ',
       expand: 'Show all',
       collapse: 'Collapse',
+      cost: 'Cost',
+      costTitle: 'Estimated cost',
+      totalCost: 'Total cost',
+      costNote: 'Estimated from the prices you enter below. Models without a price are excluded.',
+      priced: 'Priced',
+      unpriced: 'No price',
+      partialPrice: 'Partial price',
+      priceTitle: 'Model prices',
+      priceHint: 'Unit: CNY per million tokens. Leave a field empty to skip it; leave all empty to exclude the model.',
+      priceUnit: '/ 1M tokens',
+      save: 'Save prices',
+      saving: 'Saving…',
+      saved: 'Prices saved',
+      resetPrices: 'Clear prices',
+      confirmResetPrices: 'Clear all model prices?',
+      priceInput: 'Input price',
+      priceOutput: 'Output price',
+      priceCacheRead: 'Cache read price',
+      priceCacheWrite: 'Cache write price',
+      costInput: 'Input cost',
+      costOutput: 'Output cost',
+      costCacheRead: 'Cache read cost',
+      costCacheWrite: 'Cache write cost',
+      priceEmpty: 'No model recorded yet. Send one message first, then set prices here.',
+      priceDirty: 'Unsaved changes',
+      priceSavedAt: 'Prices updated',
+      corruptBackup: 'The totals file was corrupt at last startup; backed up to',
+      restoredFrom: 'Totals restored from snapshot:',
+      resetBackup: 'The data cleared by reset was snapshotted to:',
+      resetDone: 'Cleared',
+      staleTitle: 'An older build of the plugin is running',
+      staleHint: 'index.js on disk is newer, but DSH still uses the version loaded at startup (Node caches imported modules). Fully quit and restart DSH Desktop, or the new behaviour will not apply.',
+      build: 'Build',
     }
 
     // 由 apply 绑定的翻译函数；组件渲染时读取。
@@ -180,6 +258,35 @@ window.__ModuleLoader__.load({
 .dshtu-empty { font-size:12px; color:var(--dsw-alias-label-secondary); }
 .dshtu-error { font-size:12px; color:var(--dsw-alias-state-error-primary); }
 .dshtu-foot { font-size:11px; color:var(--dsw-alias-label-secondary); word-break:break-all; }
+
+/* 费用 */
+.dshtu-money { font-variant-numeric:tabular-nums; }
+.dshtu-cost-main { display:flex; align-items:flex-end; gap:8px; }
+.dshtu-cost-num { font-size:28px; line-height:1.1; font-weight:700; font-variant-numeric:tabular-nums; color:var(--dsw-alias-state-success-primary); }
+.dshtu-cost-num.is-unknown { color:var(--dsw-alias-label-secondary); font-size:20px; }
+.dshtu-cost-unit { font-size:11px; color:var(--dsw-alias-label-secondary); padding-bottom:4px; }
+.dshtu-cost-body { display:flex; flex-wrap:wrap; gap:12px 28px; margin-top:10px; }
+.dshtu-cost-item { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--dsw-alias-label-secondary); }
+.dshtu-cost-item b { font-size:13px; color:var(--dsw-alias-label-primary); font-variant-numeric:tabular-nums; }
+.dshtu-cost-item i { font-style:normal; font-size:10px; color:var(--dsw-alias-label-secondary); }
+.dshtu-note { margin-top:10px; font-size:11px; color:var(--dsw-alias-label-secondary); }
+.dshtu-warn { color:var(--dsw-alias-state-warn-primary); }
+.dshtu-ok { color:var(--dsw-alias-state-success-primary); }
+
+/* 单价编辑 */
+.dshtu-price-input { width:88px; height:24px; padding:0 6px; border-radius:6px; font-size:12px; font-variant-numeric:tabular-nums; text-align:right; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-base); color:var(--dsw-alias-label-primary); }
+.dshtu-price-input:focus { outline:none; border-color:var(--dsw-alias-brand-primary); }
+.dshtu-price-input::placeholder { color:var(--dsw-alias-label-secondary); }
+.dshtu-price-unit { margin-left:4px; font-size:10px; color:var(--dsw-alias-label-secondary); }
+.dshtu-price-cell { display:flex; align-items:center; justify-content:flex-end; }
+.dshtu-actions { display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap; }
+.dshtu-btn.is-primary { color:var(--dsw-alias-bg-base); border-color:var(--dsw-alias-brand-primary); background:var(--dsw-alias-brand-primary); }
+.dshtu-btn.is-primary:hover:not([disabled]) { color:var(--dsw-alias-bg-base); opacity:.86; }
+
+/* 旧代码横幅：不是报错，是「你改的东西还没生效」，所以用警示色而非错误色 */
+.dshtu-banner { display:flex; flex-direction:column; gap:3px; padding:10px 12px; border-radius:10px; border:1px solid var(--dsw-alias-state-warn-primary); background:var(--dsw-alias-bg-layer-2); background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); font-size:11px; line-height:1.5; }
+.dshtu-banner b { font-size:12px; color:var(--dsw-alias-state-warn-primary); }
+.dshtu-banner span { color:var(--dsw-alias-label-secondary); }
 `
 
     function formatNumber(value) {
@@ -194,6 +301,31 @@ window.__ModuleLoader__.load({
       } catch {
         return '—'
       }
+    }
+
+    /**
+     * 金额格式化：小额多留几位，避免 ¥0.00 看不出差别。
+     * @param value - 金额（元）。
+     */
+    function formatMoney(value) {
+      const number = typeof value === 'number' && Number.isFinite(value) ? value : 0
+      if (number === 0) return '0.00'
+      const abs = Math.abs(number)
+      const digits = abs < 0.01 ? 4 : 2
+      return number.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
+    }
+
+    /** 单价复用金额格式：填了 0 就显示 0，留空由调用方处理。 */
+    function formatRate(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return ''
+      return String(value)
+    }
+
+    /** 从一行模型统计里取费用对象（Host 未返回时给一个全 0 的兜底）。 */
+    function costOf(row) {
+      const cost = row?.cost
+      if (cost !== null && typeof cost === 'object') return cost
+      return { known: false, partial: false, total: 0, items: {} }
     }
 
     function pad2(value) {
@@ -329,9 +461,262 @@ window.__ModuleLoader__.load({
       return h('svg', { className: 'dshtu-chart', viewBox: `0 0 ${width} ${plot + 20}`, role: 'img', 'aria-label': `${t('trend')} ${range}${t('dayUnit')}` }, children)
     }
 
+    /** 费用卡：总费用 + 四个计费项明细 + 未定价提示。 */
+    function CostCard({ data, models }) {
+      const totalCost = typeof data.totalCost === 'number' ? data.totalCost : 0
+      const priced = models.filter((row) => costOf(row).known)
+      const unpriced = models.filter((row) => !costOf(row).known)
+      // 明细按「所有已定价模型」逐项求和，而不是用总额推，口径才和按模型表一致。
+      const items = PRICE_FIELDS.map(({ field, label }) => {
+        let cost = 0
+        let tokens = 0
+        for (const row of priced) {
+          const item = costOf(row).items?.[field]
+          cost += item?.cost ?? 0
+          tokens += item?.tokens ?? row[`${field}Tokens`] ?? 0
+        }
+        return { field, label, cost, tokens }
+      })
+      const hasCost = priced.length > 0
+
+      return h(
+        'div',
+        { className: 'dshtu-card' },
+        h(
+          'div',
+          { className: 'dshtu-section-head' },
+          h('h4', { className: 'dshtu-section-title' }, t('costTitle')),
+          h('span', { className: 'dshtu-spacer' }),
+          h(
+            'span',
+            { className: 'dshtu-count' },
+            `${t('priced')} ${priced.length} / ${models.length}`,
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dshtu-cost-main' },
+          h(
+            'span',
+            { className: `dshtu-cost-num${hasCost ? '' : ' is-unknown'}` },
+            hasCost ? `¥${formatMoney(totalCost)}` : t('unpriced'),
+          ),
+          hasCost ? h('span', { className: 'dshtu-cost-unit' }, 'CNY') : null,
+        ),
+        hasCost
+          ? h(
+              'div',
+              { className: 'dshtu-cost-body' },
+              items.map((item) =>
+                h(
+                  'div',
+                  { className: 'dshtu-cost-item', key: item.field },
+                  h('span', null, t(item.label)),
+                  h('b', null, `¥${formatMoney(item.cost)}`),
+                  h('i', null, `${formatNumber(item.tokens)} tok`),
+                ),
+              ),
+            )
+          : null,
+        h('div', { className: 'dshtu-note' }, t('costNote')),
+        unpriced.length > 0
+          ? h(
+              'div',
+              { className: 'dshtu-note dshtu-warn' },
+              `${t('unpriced')}：${unpriced.map((row) => row.model).join('、')}`,
+            )
+          : null,
+      )
+    }
+
+    /**
+     * 单价编辑表：每个已出现过的模型四个输入框，改完统一保存。
+     *
+     * 输入框用字符串状态（'' 表示不计该项），所以组件内部维护 draft，保存成功后才回填。
+     * @param models - /stats 里的按模型统计。
+     * @param prices - Host 当前保存的单价表。
+     * @param onSave - 保存回调，收到清洗后的单价表。
+     * @param busy - 保存中，禁用按钮。
+     * @param savedAt - 上次保存时间，用于给出反馈。
+     */
+    function PriceEditor({ models, prices, onSave, busy, savedAt }) {
+      /** 把 Host 的单价表转成输入框用的字符串草稿。 */
+      const toDraft = (source) => {
+        const out = {}
+        for (const row of models) {
+          const price = (source ?? {})[row.key] ?? {}
+          const entry = {}
+          for (const { field } of PRICE_FIELDS) {
+            const value = price[field]
+            entry[field] = typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+          }
+          out[row.key] = entry
+        }
+        return out
+      }
+
+      const [draft, setDraft] = React.useState(() => toDraft(prices))
+      // 记录草稿对应的价格版本；Host 回传新价格时（保存成功/刷新）才重置草稿，
+      // 否则用户正在输入的内容会被一次轮询覆盖掉。
+      const [base, setBase] = React.useState(() => JSON.stringify(prices ?? {}))
+      const [flash, setFlash] = React.useState(false)
+      const current = JSON.stringify(prices ?? {})
+      if (base !== current) {
+        setBase(current)
+        setDraft(toDraft(prices))
+      }
+
+      const setField = (key, field, value) => {
+        setDraft((previous) => ({ ...previous, [key]: { ...previous[key], [field]: value } }))
+      }
+
+      const dirty = JSON.stringify(draft) !== JSON.stringify(toDraft(prices))
+
+      const save = () => {
+        const payload = {}
+        for (const [key, entry] of Object.entries(draft)) {
+          const price = {}
+          for (const { field } of PRICE_FIELDS) {
+            const raw = String(entry[field] ?? '').trim()
+            if (raw === '') continue
+            const parsed = Number(raw)
+            if (!Number.isFinite(parsed) || parsed < 0) continue
+            price[field] = parsed
+          }
+          // 四项全空等于删除该模型的单价。
+          if (Object.keys(price).length > 0) payload[key] = price
+        }
+        onSave(payload)
+        setFlash(true)
+      }
+
+      React.useEffect(() => {
+        if (!flash) return undefined
+        const timer = setTimeout(() => setFlash(false), 2200)
+        return () => clearTimeout(timer)
+      }, [flash])
+
+      const clearAll = () => {
+        if (typeof window.confirm === 'function' && !window.confirm(t('confirmResetPrices'))) return
+        setDraft((previous) => {
+          const out = {}
+          for (const key of Object.keys(previous)) {
+            const entry = {}
+            for (const { field } of PRICE_FIELDS) entry[field] = ''
+            out[key] = entry
+          }
+          return out
+        })
+      }
+
+      if (models.length === 0) {
+        return h(
+          'div',
+          { className: 'dshtu-card' },
+          h('div', { className: 'dshtu-section-head' }, h('h4', { className: 'dshtu-section-title' }, t('priceTitle'))),
+          h('div', { className: 'dshtu-empty' }, t('priceEmpty')),
+        )
+      }
+
+      const head = h(
+        'div',
+        { className: 'dshtu-section-head' },
+        h('h4', { className: 'dshtu-section-title' }, t('priceTitle')),
+        h('span', { className: 'dshtu-spacer' }),
+        dirty ? h('span', { className: 'dshtu-count dshtu-warn' }, t('priceDirty')) : null,
+        !dirty && flash ? h('span', { className: 'dshtu-count dshtu-ok' }, t('saved')) : null,
+        !dirty && !flash && savedAt > 0 ? h('span', { className: 'dshtu-count' }, `${t('priceSavedAt')} ${formatTime(savedAt)}`) : null,
+      )
+
+      return h(
+        'div',
+        { className: 'dshtu-card' },
+        head,
+        h('div', { className: 'dshtu-note' }, t('priceHint')),
+        h(
+          'div',
+          { className: 'dshtu-table-wrap' },
+          h(
+            'table',
+            { className: 'dshtu-table' },
+            h(
+              'thead',
+              null,
+              h(
+                'tr',
+                null,
+                h('th', { key: 'model' }, t('model')),
+                ...PRICE_FIELDS.map(({ field, label }) => h('th', { key: field }, t(label))),
+              ),
+            ),
+            h(
+              'tbody',
+              null,
+              models.map((row) =>
+                h(
+                  'tr',
+                  { key: row.key },
+                  h(
+                    'td',
+                    { key: 'model' },
+                    h(
+                      'div',
+                      { className: 'dshtu-model' },
+                      h('span', { className: 'dshtu-model-name', title: row.model }, row.model),
+                      h(
+                        'div',
+                        { className: 'dshtu-model-meta' },
+                        row.provider ? h('span', { className: 'dshtu-badge' }, row.provider) : null,
+                        costOf(row).known
+                          ? h('span', { className: 'dshtu-badge' }, `¥${formatMoney(costOf(row).total)}`)
+                          : h('span', { className: 'dshtu-badge' }, t('unpriced')),
+                      ),
+                    ),
+                  ),
+                  ...PRICE_FIELDS.map(({ field }) =>
+                    h(
+                      'td',
+                      { key: field },
+                      h(
+                        'span',
+                        { className: 'dshtu-price-cell' },
+                        h('input', {
+                          className: 'dshtu-price-input',
+                          type: 'number',
+                          min: '0',
+                          step: '0.01',
+                          inputMode: 'decimal',
+                          placeholder: '—',
+                          'aria-label': `${row.model} ${t(field === 'input' ? 'priceInput' : field === 'output' ? 'priceOutput' : field === 'cacheRead' ? 'priceCacheRead' : 'priceCacheWrite')}`,
+                          value: draft[row.key]?.[field] ?? '',
+                          onChange: (event) => setField(row.key, field, event.target.value),
+                        }),
+                        h('span', { className: 'dshtu-price-unit' }, t('priceUnit')),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dshtu-actions' },
+          h(
+            'button',
+            { className: 'dshtu-btn is-primary', type: 'button', disabled: busy || !dirty, onClick: save },
+            busy ? t('saving') : t('save'),
+          ),
+          h('button', { className: 'dshtu-btn', type: 'button', disabled: busy || !dirty, onClick: clearAll }, t('resetPrices')),
+        ),
+      )
+    }
+
     function ModelTable({ models }) {
       const maxTotal = models.reduce((max, row) => (row.totalTokens > max ? row.totalTokens : max), 0)
       const has = (key) => models.some((row) => (row[key] ?? 0) > 0)
+      const anyPriced = models.some((row) => costOf(row).known)
       const columns = [
         { key: 'model', label: t('model'), when: true },
         { key: 'calls', label: t('calls'), when: true },
@@ -341,6 +726,7 @@ window.__ModuleLoader__.load({
         { key: 'cacheWriteTokens', label: t('cacheWrite'), when: has('cacheWriteTokens') },
         { key: 'reasoningTokens', label: t('reasoning'), when: has('reasoningTokens') },
         { key: 'totalTokens', label: t('total'), when: true },
+        { key: 'cost', label: t('cost'), when: anyPriced },
       ].filter((column) => column.when)
       return h(
         'table',
@@ -370,6 +756,16 @@ window.__ModuleLoader__.load({
                         h('span', { className: 'dshtu-share', title: `${t('share')} ${share.toFixed(1)}%` }, h('i', { style: { width: `${share}%` } })),
                       ),
                     ),
+                  )
+                }
+                if (column.key === 'cost') {
+                  const cost = costOf(row)
+                  if (!cost.known) return h('td', { key: column.key }, h('span', { className: 'dshtu-empty' }, t('unpriced')))
+                  return h(
+                    'td',
+                    { key: column.key, className: 'dshtu-money' },
+                    `¥${formatMoney(cost.total)}`,
+                    cost.partial ? h('span', { className: 'dshtu-price-unit dshtu-warn' }, '*') : null,
                   )
                 }
                 return h('td', { key: column.key }, formatNumber(row[column.key]))
@@ -414,6 +810,14 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [range, setRange] = React.useState(14)
       const [expanded, setExpanded] = React.useState(false)
+      // 清零后的短暂反馈：Host 只改数字，页面不给点动静会让人以为「点了没反应」。
+      const [flash, setFlash] = React.useState(null)
+
+      React.useEffect(() => {
+        if (flash === null) return undefined
+        const timer = setTimeout(() => setFlash(null), 2600)
+        return () => clearTimeout(timer)
+      }, [flash])
 
       const accept = (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -444,10 +848,29 @@ window.__ModuleLoader__.load({
           .then((payload) => {
             setData(payload)
             setError(null)
+            // 明确回一句「已清零」，否则页面只是数字变 0，很像点了没反应。
+            setFlash('reset')
           })
           .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
           .finally(() => setBusy(false))
       }
+
+      /** 保存单价：POST 覆盖整张表，Host 回传带新费用的完整统计。 */
+      const savePrices = React.useCallback((prices) => {
+        setBusy(true)
+        fetch(PRICES_PATH, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ prices }),
+        })
+          .then(accept)
+          .then((payload) => {
+            setData(payload)
+            setError(null)
+          })
+          .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+          .finally(() => setBusy(false))
+      }, [])
 
       const totals = data?.totals ?? null
       const models = Array.isArray(data?.models) ? data.models : []
@@ -467,6 +890,7 @@ window.__ModuleLoader__.load({
         h('h3', { className: 'dshtu-title' }, t('title')),
         h('span', { className: 'dshtu-live' }, h('i', { className: 'dshtu-dot' }), t('live')),
         h('span', { className: 'dshtu-spacer' }),
+        flash === 'reset' ? h('span', { className: 'dshtu-count dshtu-ok' }, t('resetDone')) : null,
         h('button', { className: 'dshtu-btn', type: 'button', disabled: busy, onClick: load }, t('refresh')),
         h('button', { className: 'dshtu-btn', type: 'button', disabled: busy, onClick: reset }, t('reset')),
       )
@@ -480,6 +904,17 @@ window.__ModuleLoader__.load({
           error === null ? h('div', { className: 'dshtu-empty', key: 'loading' }, t('loading')) : h('div', { className: 'dshtu-error', key: 'error' }, `${t('failed')}${error}`),
         )
       }
+
+      // 旧代码横幅：跑的是启动时缓存的旧模块时，一切「新功能不生效」都能对上号。
+      const staleBanner =
+        typeof data.staleSince === 'number'
+          ? h(
+              'div',
+              { className: 'dshtu-banner', key: 'stale' },
+              h('b', null, t('staleTitle')),
+              h('span', null, t('staleHint')),
+            )
+          : null
 
       const hero = h(
         'div',
@@ -584,6 +1019,17 @@ window.__ModuleLoader__.load({
         models.length === 0 ? h('div', { className: 'dshtu-empty' }, t('empty')) : h('div', { className: 'dshtu-table-wrap' }, h(ModelTable, { models })),
       )
 
+      const costCard = models.length === 0 ? null : h(CostCard, { key: 'cost', data, models })
+
+      const priceCard = h(PriceEditor, {
+        key: 'prices',
+        models,
+        prices: data.prices ?? {},
+        onSave: savePrices,
+        busy,
+        savedAt: data.pricesUpdatedAt ?? 0,
+      })
+
       const dayCard = h(
         'div',
         { className: 'dshtu-card', key: 'days' },
@@ -600,6 +1046,14 @@ window.__ModuleLoader__.load({
         days.length === 0 ? h('div', { className: 'dshtu-empty' }, t('empty')) : h('div', { className: 'dshtu-table-wrap' }, h(DayTable, { days: dayRows })),
       )
 
+      // 数据兜底提示：只在真的触发过时出现，平时不占地方。
+      // 三件事都可能让用户以为「数据丢了」，这里明确告诉他数据在哪、能不能救回。
+      const recoverNotices = [
+        data.corruptBackup ? h('div', { className: 'dshtu-note dshtu-warn', key: 'corrupt' }, `${t('corruptBackup')} ${data.corruptBackup}`) : null,
+        data.restoredFrom ? h('div', { className: 'dshtu-note dshtu-ok', key: 'restored' }, `${t('restoredFrom')} ${data.restoredFrom}`) : null,
+        data.resetBackup ? h('div', { className: 'dshtu-note', key: 'resetsnap' }, `${t('resetBackup')} ${data.resetBackup}`) : null,
+      ].filter(Boolean)
+
       const foot = h('div', { className: 'dshtu-foot', key: 'foot' }, `${t('file')}：${data.file ?? '—'}`)
 
       return h(
@@ -607,12 +1061,16 @@ window.__ModuleLoader__.load({
         { className: 'dshtu-root' },
         h('style', { key: 'style' }, CSS),
         head,
+        staleBanner,
         error === null ? null : h('div', { className: 'dshtu-error', key: 'error' }, `${t('failed')}${error}`),
         hero,
+        costCard,
         breakdown,
         trend,
         modelCard,
+        priceCard,
         dayCard,
+        ...recoverNotices,
         foot,
       )
     }
