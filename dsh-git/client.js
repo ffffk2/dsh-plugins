@@ -125,6 +125,7 @@ window.__ModuleLoader__.load({
       stashPopOk: '已恢复贮藏',
       stashNoMessage: '（无说明）',
       noCommits: '还没有任何提交。',
+      graphTruncated: '泳道图在此截断：上面还有未加载的提交，点「加载更多」接上。',
       loadMore: '加载更多',
       by: '作者',
       filesChanged: '{n} 个文件',
@@ -232,6 +233,7 @@ window.__ModuleLoader__.load({
       stashPopOk: 'Stash restored',
       stashNoMessage: '(no message)',
       noCommits: 'No commits yet.',
+      graphTruncated: 'Graph is cut off here: earlier commits are not loaded yet. Use "Load more" to continue.',
       loadMore: 'Load more',
       by: 'by',
       filesChanged: '{n} files',
@@ -348,15 +350,27 @@ window.__ModuleLoader__.load({
 /* 提交列表 */
 .dshg-commit { display:flex; gap:8px; padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--dsw-alias-border-l1); }
 .dshg-commit:hover { background:var(--dsw-alias-bg-layer-2); }
-.dshg-graph { flex:0 0 auto; width:12px; display:flex; flex-direction:column; align-items:center; padding-top:3px; }
-.dshg-node { width:8px; height:8px; border-radius:50%; border:2px solid var(--dsw-alias-brand-primary); flex:0 0 auto; }
-.dshg-thread { width:2px; flex:1 1 auto; background:var(--dsw-alias-border-l2); margin-top:2px; }
+/* 泳道图：整格是一列列竖线，节点压在线上。行高由右侧内容撑开，
+   所以上下两半都用 flex 平分，线才能首尾对齐、跨行连成一条。 */
+.dshg-graph { flex:0 0 auto; position:relative; align-self:stretch; min-height:34px; }
+.dshg-graph-half { position:absolute; left:0; right:0; height:50%; }
+.dshg-graph-half.is-top { top:0; }
+.dshg-graph-half.is-bottom { bottom:0; }
+.dshg-thread { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:var(--dsw-alias-border-l2); }
+/* 主线（第一个父提交那条）用品牌色，和别的分支区分开 */
+.dshg-thread.is-main { background:var(--dsw-alias-brand-primary); opacity:.55; }
+.dshg-graph-join { position:absolute; top:0; height:2px; background:var(--dsw-alias-border-l2); }
+.dshg-node { position:absolute; top:50%; width:8px; height:8px; margin:-5px 0 0 -5px; border-radius:50%; background:var(--dsw-alias-bg-base); border:2px solid var(--dsw-alias-border-l2); box-sizing:border-box; }
+/* 主角：当前 HEAD 那一行的节点放大、实心、用品牌色 */
+.dshg-node.is-head { width:10px; height:10px; margin:-6px 0 0 -6px; background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
 .dshg-commit-main { flex:1 1 auto; min-width:0; }
 .dshg-subject { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dshg-commit-meta { display:flex; gap:8px; margin-top:2px; font-size:10.5px; color:var(--dsw-alias-label-secondary); flex-wrap:wrap; }
 .dshg-hash { font-family:var(--ds-font-family-mono, ui-monospace, monospace); color:var(--dsw-alias-state-business-primary); }
 .dshg-ref { font-size:10px; padding:0 5px; height:15px; line-height:15px; border-radius:7px; background:var(--dsw-alias-bg-layer-2); border:1px solid var(--dsw-alias-border-l2); color:var(--dsw-alias-label-secondary); }
-.dshg-ref.is-head { border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-brand-primary); }
+.dshg-ref.is-head { border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-brand-primary); font-weight:600; }
+/* 图被分页截断时的提示：贴在列表尾，做成弱化的脚注而不是错误。 */
+.dshg-graph-note { padding:8px 12px 8px 30px; font-size:10.5px; line-height:1.5; color:var(--dsw-alias-label-secondary); border-bottom:1px dashed var(--dsw-alias-border-l2); }
 
 /* 分支列表 */
 .dshg-branch { display:flex; align-items:center; gap:6px; padding:5px 10px; cursor:pointer; }
@@ -457,6 +471,97 @@ window.__ModuleLoader__.load({
       return String(value ?? '')
         .replace(/\s+/g, '-')
         .replace(/-{2,}/g, '-')
+    }
+
+    /** 泳道最大列数：再多也没人看得懂，超出的一律并到最后一列。 */
+    const MAX_LANES = 6
+
+    /**
+     * 把提交列表算成多泳道拓扑图（每个提交占一行，行内有多条竖线与节点）。
+     *
+     * 输入是 `git log` 的顺序（新→旧），这是关键前提：处理一个提交时，
+     * 它的父提交一定还在后面，所以「谁接着谁」可以靠一次前向扫描定下来。
+     *
+     * 算法：维护 lanes 数组，每格是「一条竖线在等着哪个 commit hash」。
+     *   - 当前提交在 lanes 里占哪一列，就是它的泳道；同一 hash 可能占多列
+     *     （merge 的两个父各自被别的分支占着），全部收拢到最左那列显示。
+     *   - 收拢后，把这些格子都改指向它的父提交（第一个父留原列 = 主线延续，
+     *     其余父插新列 = 分叉），并把重复指向同一 hash 的格子清掉（避免两条线叠在一条上）。
+     *
+     * 分页的坑：只看一页数据时，父提交可能还没加载，竖线到这里就断了。
+     * 所以返回 truncated 标记，由界面提示「还有更多」，而不是假装图是完整的。
+     *
+     * @param commits - 提交数组，新→旧；每项需有 hash 与 parents。
+     * @returns {{rows: Array, laneCount: number, truncated: boolean}} rows 与 commits 等长，
+     *   每项是 { lane, lanes: Array<string|null>, parents: Array<number> }。
+     */
+    function buildGraph(commits) {
+      const list = Array.isArray(commits) ? commits : []
+      const known = new Set(list.map((commit) => commit.hash))
+      let lanes = []
+      const rows = []
+      let laneCount = 0
+      let truncated = false
+
+      for (const commit of list) {
+        const parents = Array.isArray(commit.parents) ? commit.parents : []
+
+        // 找当前提交占用的列；一条都没有说明它是「新出现的线头」（例如当前分支的最新提交）。
+        let mine = []
+        for (let index = 0; index < lanes.length; index += 1) {
+          if (lanes[index] === commit.hash) mine.push(index)
+        }
+        if (mine.length === 0) {
+          // 插到最左的空位；没有空位就追加一列。上限之外统一挤在最后一列。
+          const free = lanes.indexOf(null)
+          const at = free === -1 ? lanes.length : free
+          if (at >= MAX_LANES) {
+            mine = [MAX_LANES - 1]
+            truncated = true
+          } else {
+            if (free === -1) lanes.push(commit.hash)
+            else lanes[free] = commit.hash
+            mine = [at]
+          }
+        }
+        const lane = Math.min(mine[0], MAX_LANES - 1)
+
+        // 收拢：当前提交占的列全部腾出来，交给它的父提交接手。
+        for (const index of mine) lanes[index] = null
+        const parentLanes = []
+        parents.forEach((parent, order) => {
+          if (!known.has(parent)) {
+            // 父提交不在本页里：留一条线表示「图还没完」，等加载更多再接上。
+            truncated = true
+            return
+          }
+          // 已有一列在等这个父提交，就并过去，别为一个提交铺两条线。
+          const existing = lanes.indexOf(parent)
+          if (existing !== -1) {
+            parentLanes.push(Math.min(existing, MAX_LANES - 1))
+            return
+          }
+          // 第一个父沿用它自己那一列（主线延续），其余父插空位（分叉）。
+          let at = order === 0 ? lane : -1
+          if (at === -1 || lanes[at] !== null) at = lanes.indexOf(null)
+          if (at === -1) at = lanes.length
+          if (at >= MAX_LANES) {
+            parentLanes.push(MAX_LANES - 1)
+            truncated = true
+            return
+          }
+          if (at === lanes.length) lanes.push(parent)
+          else lanes[at] = parent
+          parentLanes.push(at)
+        })
+        // 尾部空列裁掉，泳道数才不会只增不减。
+        while (lanes.length > 0 && lanes[lanes.length - 1] === null) lanes.pop()
+        if (lanes.length > laneCount) laneCount = lanes.length
+
+        rows.push({ lane, lanes: lanes.slice(), parents: parentLanes })
+      }
+
+      return { rows, laneCount: Math.min(Math.max(laneCount, 1), MAX_LANES), truncated }
     }
 
     /**
@@ -661,12 +766,67 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 提交列表里的一行。 */
-    function CommitRow({ commit, onOpen }) {
+    /**
+     * 提交列表里的一行：左边是泳道图的一格，右边是提交信息。
+     *
+     * 图用纯 div 画（竖线是 2px 宽的 span），不引 SVG：
+     * 行高由内容决定、每行都要重画，div + flex 更简单，也不必算坐标。
+     *
+     * @param props.commit - 提交对象。
+     * @param props.row - buildGraph 算出的这一行 { lane, lanes, parents }。
+     * @param props.laneCount - 总泳道数，决定左侧留多宽。
+     * @param props.isHead - 是不是当前 HEAD 指向的提交（主角要高亮）。
+     * @param props.onOpen - 点开提交详情。
+     */
+    function CommitRow({ commit, row, laneCount, isHead, onOpen }) {
+      const LANE_W = 12
+      const lane = row === undefined ? 0 : row.lane
+      const grid = row === undefined ? [] : row.lanes
+      // 一行里可能有 1~3 段竖线：节点上方接着旧线，下方分给父提交。
+      // 上方的线画成横跨整行；下方的线从节点那列画到各父提交所在列，形成分叉/汇流的斜感。
+      const parentLanes = row === undefined ? [] : row.parents
       return h(
         'div',
         { className: 'dshg-commit', onClick: () => onOpen(commit), role: 'button', tabIndex: 0 },
-        h('div', { className: 'dshg-graph' }, h('span', { className: 'dshg-node' }), h('span', { className: 'dshg-thread' })),
+        h(
+          'div',
+          { className: 'dshg-graph', style: { width: `${Math.max(laneCount, 1) * LANE_W + 4}px` } },
+          // 上半段：节点之前的竖线（这一行网格里除了自己那列之外的线都穿行而过）。
+          h(
+            'div',
+            { className: 'dshg-graph-half is-top' },
+            grid.map((value, index) =>
+              value === null || index === lane
+                ? null
+                : h('span', { key: `t${index}`, className: 'dshg-thread', style: { left: `${index * LANE_W + LANE_W / 2}px` } }),
+            ),
+          ),
+          h('span', {
+            className: `dshg-node${isHead ? ' is-head' : ''}`,
+            style: { left: `${lane * LANE_W + LANE_W / 2}px` },
+          }),
+          // 下半段：节点之后分向各父提交的竖线。父多于一列时加一段横向连线表示汇流。
+          h(
+            'div',
+            { className: 'dshg-graph-half is-bottom' },
+            parentLanes.map((parentLane, index) =>
+              h('span', {
+                key: `b${index}`,
+                className: `dshg-thread${index === 0 ? ' is-main' : ''}`,
+                style: { left: `${parentLane * LANE_W + LANE_W / 2}px` },
+              }),
+            ),
+            parentLanes.length > 1
+              ? h('span', {
+                  className: 'dshg-graph-join',
+                  style: {
+                    left: `${Math.min(...parentLanes) * LANE_W + LANE_W / 2}px`,
+                    width: `${(Math.max(...parentLanes) - Math.min(...parentLanes)) * LANE_W}px`,
+                  },
+                })
+              : null,
+          ),
+        ),
         h(
           'div',
           { className: 'dshg-commit-main' },
@@ -678,7 +838,15 @@ window.__ModuleLoader__.load({
             h('span', null, commit.author),
             h('span', null, formatDate(commit.date)),
             ...(commit.refs ?? []).slice(0, 3).map((ref, index) =>
-              h('span', { key: `${ref}-${index}`, className: `dshg-ref${ref.startsWith('HEAD') ? ' is-head' : ''}` }, ref.replace(/^HEAD -> /, '')),
+              h(
+                'span',
+                {
+                  key: `${ref}-${index}`,
+                  // 当前分支的标签要一眼认出来：HEAD 指向的这一行，它的分支名标签高亮，其余中性。
+                  className: `dshg-ref${isHead && !ref.startsWith('origin/') ? ' is-head' : ''}`,
+                },
+                ref.replace(/^HEAD -> /, ''),
+              ),
             ),
           ),
         ),
@@ -1359,10 +1527,26 @@ window.__ModuleLoader__.load({
           ? h(
               React.Fragment,
               { key: 'history' },
-              log.length === 0 && !logLoading
-                ? h('div', { className: 'dshg-empty' }, t('noCommits'))
-                : log.map((commit) => h(CommitRow, { key: commit.hash, commit, onOpen: openCommit })),
-              logLoading ? h('div', { className: 'dshg-empty' }, t('loading')) : null,
+              ...(() => {
+                if (log.length === 0) return [logLoading ? h('div', { key: 'loading', className: 'dshg-empty' }, t('loading')) : h('div', { key: 'empty', className: 'dshg-empty' }, t('noCommits'))]
+                const graph = buildGraph(log)
+                const nodes = log.map((commit, index) =>
+                  h(CommitRow, {
+                    key: commit.hash,
+                    commit,
+                    row: graph.rows[index],
+                    laneCount: graph.laneCount,
+                    // 当前分支就藏在 refs 里（`HEAD -> main`）；游离 HEAD 时没有这一项，
+                    // 那就退而认 HEAD 自己所在的那一行。
+                    isHead: (commit.refs ?? []).some((ref) => ref.startsWith('HEAD')),
+                    onOpen: openCommit,
+                  }),
+                )
+                // 分页会让图在页尾断开：明确提示，免得用户以为图就长这样。
+                if (graph.truncated) nodes.push(h('div', { key: 'truncated', className: 'dshg-graph-note' }, t('graphTruncated')))
+                return nodes
+              })(),
+              logLoading && log.length > 0 ? h('div', { className: 'dshg-empty' }, t('loading')) : null,
               logMore && !logLoading
                 ? h('div', { className: 'dshg-inline-form' }, h('button', { className: 'dshg-btn', type: 'button', onClick: () => void loadLog(log.length) }, t('loadMore')))
                 : null,

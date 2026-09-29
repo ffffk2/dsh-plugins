@@ -822,6 +822,87 @@ group('面板渲染')
   expect('非当前分支有合并按钮', branchHtml.includes('⇥'))
   expect('当前分支不显示合并/切换/删除', (branchHtml.match(/dshg-branch is-current/g) ?? []).length >= 1)
 
+  // (d2) 历史页：提交之间要有真实拓扑（泳道），不是每行一个孤立圆点。
+  //      用一段「主线 + 一条分支分出去又合回来」的历史，断言图形结构真的分了两列。
+  const graphLog = {
+    commits: [
+      { hash: 'm1', shortHash: 'm1', parents: ['a1', 'b1'], author: 'Ann', date: '2024-01-04T00:00:00+08:00', refs: ['HEAD -> main'], subject: 'Merge topic', body: '' },
+      { hash: 'a1', shortHash: 'a1', parents: ['root'], author: 'Ann', date: '2024-01-03T00:00:00+08:00', refs: [], subject: 'Main work', body: '' },
+      { hash: 'b1', shortHash: 'b1', parents: ['root'], author: 'Bob', date: '2024-01-02T00:00:00+08:00', refs: [], subject: 'Side work', body: '' },
+      { hash: 'root', shortHash: 'root', parents: [], author: 'Ann', date: '2024-01-01T00:00:00+08:00', refs: [], subject: 'Init', body: '' },
+    ],
+    hasMore: false,
+    error: null,
+  }
+  globalThis.fetch = async (url) => {
+    const text = String(url)
+    let payload = {}
+    if (text.includes('/git/status')) payload = stubbed
+    else if (text.includes('/git/branches')) payload = branchStub
+    else if (text.includes('/git/log')) payload = graphLog
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  let historyHtml = ''
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+    const historyTabButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.className ?? '').includes('dshg-tab') && textOf(entry.attrs.children) === 'history')
+    expect('找得到历史页签按钮', historyTabButton !== undefined)
+    historyTabButton?.handler({})
+    for (let round = 0; round < 4; round += 1) {
+      historyHtml = instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    historyHtml = instance.rerender(hostProps('D:/demo'))
+  } catch (error) {
+    expect('历史页渲染不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  if (DEBUG) { const gi = historyHtml.indexOf('dshg-node', historyHtml.indexOf('</style>')); console.log('  历史页 graph 片段：', gi === -1 ? 'NO NODE FOUND' : historyHtml.slice(Math.max(0, gi - 300), gi + 900)) }
+  expect('历史页列出了提交', historyHtml.includes('Merge topic') && historyHtml.includes('Init'))
+  // 4 个提交 = 4 个节点；精确匹配 `dshg-node"` 或 `dshg-node `，别把 dshg-node is-head 数成两个。
+  // 注意渲染出的属性名是 className（极简 React 保留字面量），不是 class。
+  expect('每个提交一个节点', (historyHtml.match(/className="dshg-node[ "]/g) ?? []).length === 4, (historyHtml.match(/className="dshg-node[ "]/g) ?? []).length)
+  // merge 那一行有两个父提交 → 下半段要有两段线与一段横向汇流线。
+  expect('merge 提交画出了分叉线', historyHtml.includes('dshg-graph-join'), historyHtml.includes('dshg-graph-join'))
+  // 真的分了列：节点不能全挤在 left:6px 上，否则「拓扑图」只是每行一个点。
+  const nodeLefts = [...historyHtml.matchAll(/className="dshg-node[^"]*" style="left:(\d+)px"/g)].map((match) => Number(match[1]))
+  expect('节点分布在不止一列', new Set(nodeLefts).size >= 2, JSON.stringify(nodeLefts))
+  // 当前 HEAD 那一行是主角：节点高亮、分支名标签高亮。
+  expect('HEAD 节点被高亮（主角）', (historyHtml.match(/dshg-node is-head/g) ?? []).length === 1, (historyHtml.match(/dshg-node is-head/g) ?? []).length)
+  expect('HEAD 的标签被高亮', historyHtml.includes('dshg-ref is-head'))
+  // 全量加载完（父提交都在）时不该出现截断提示——提示乱冒会让人以为图不完整。
+  expect('数据完整时不显示截断提示', historyHtml.includes('graphTruncated') === false)
+
+  // (d3) 分页截断：只有一页、父提交还没加载时必须显式提示，而不是假装图画完了。
+  globalThis.fetch = async (url) => {
+    const text = String(url)
+    let payload = {}
+    if (text.includes('/git/status')) payload = stubbed
+    else if (text.includes('/git/branches')) payload = branchStub
+    else if (text.includes('/git/log')) payload = { commits: [{ hash: 'x1', shortHash: 'x1', parents: ['not-loaded'], author: 'Ann', date: '2024-01-01T00:00:00+08:00', refs: [], subject: 'Only one', body: '' }], hasMore: true, error: null }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  let truncatedHtml = ''
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+    const historyTabButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.className ?? '').includes('dshg-tab') && textOf(entry.attrs.children) === 'history')
+    historyTabButton?.handler({})
+    for (let round = 0; round < 4; round += 1) {
+      truncatedHtml = instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  } catch (error) {
+    expect('截断用例渲染不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  expect('父提交未加载时提示图被截断', truncatedHtml.includes('graphTruncated'))
+
   // (e) 交互闭环：选出起点 → 建分支，断言起点真的被发给了后端。
   //     只断言「下拉框存在」是不够的——曾经把 startPoint 从请求里漏掉，
   //     界面看起来完全正常，但功能静默失效。
@@ -954,11 +1035,17 @@ let internals
   expect('重命名带上原路径', parsed[3].from === 'old.txt' && parsed[3].path === 'new.txt', parsed[3])
   expect('中文路径不被转义', internals.parseStatusZ('?? 中文 文件.txt\0')[0].path === '中文 文件.txt')
 
-  const logRaw = 'h1\x1fh1\x1fAnn\x1fa@b.c\x1f2024-01-01T00:00:00+08:00\x1fHEAD -> main, origin/main\x1fFix | pipe\x1fbody\x1e'
+  const logRaw = 'h1\x1fh1\x1fp1\x1fAnn\x1fa@b.c\x1f2024-01-01T00:00:00+08:00\x1fHEAD -> main, origin/main\x1fFix | pipe\x1fbody\x1e'
   const commits = internals.parseLog(logRaw)
   expect('log 解析出 1 条', commits.length === 1, commits.length)
   expect('标题里的竖线不影响解析', commits[0].subject === 'Fix | pipe', commits[0].subject)
   expect('refs 被拆开', JSON.stringify(commits[0].refs) === JSON.stringify(['HEAD -> main', 'origin/main']), commits[0].refs)
+  expect('单父提交解析成 1 个 parent', JSON.stringify(commits[0].parents) === JSON.stringify(['p1']), commits[0].parents)
+  // merge 有两个父，根提交没有父：泳道算法全靠这个数组区分「延续」和「分叉/汇合」。
+  const mergeRaw = 'm1\x1fm1\x1fa1 a2\x1fAnn\x1fa@b.c\x1f2024-01-01T00:00:00+08:00\x1f\x1fMerge\x1f\x1e'
+  const rootRaw = 'r1\x1fr1\x1f\x1fAnn\x1fa@b.c\x1f2024-01-01T00:00:00+08:00\x1f\x1fInit\x1f\x1e'
+  expect('merge 解析出 2 个 parent', JSON.stringify(internals.parseLog(mergeRaw)[0].parents) === JSON.stringify(['a1', 'a2']), internals.parseLog(mergeRaw)[0].parents)
+  expect('根提交 parents 为空数组', JSON.stringify(internals.parseLog(rootRaw)[0].parents) === JSON.stringify([]), internals.parseLog(rootRaw)[0].parents)
   expect('空 log 返回空数组', internals.parseLog('').length === 0)
 
   expect('分类：未跟踪', internals.classify('?', '?') === 'untracked')

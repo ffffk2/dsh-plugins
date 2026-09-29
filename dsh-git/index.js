@@ -304,10 +304,13 @@ function parseLog(raw) {
     .map((chunk) => chunk.trim())
     .filter((chunk) => chunk !== '')
     .map((chunk) => {
-      const [hash, shortHash, author, email, date, refs, subject, body] = chunk.split('\x1f')
+      const [hash, shortHash, parents, author, email, date, refs, subject, body] = chunk.split('\x1f')
       return {
         hash,
         shortHash,
+        // 父提交：画泳道图只需要「谁接在谁后面」。
+        // 根提交没有父，merge 有两个及以上（octopus），所以这里是数组而不是可空单值。
+        parents: parents === undefined || parents.trim() === '' ? [] : parents.trim().split(' ').filter(Boolean),
         author,
         email,
         date,
@@ -318,7 +321,7 @@ function parseLog(raw) {
     })
 }
 
-const LOG_FORMAT = '%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%s%x1f%b%x1e'
+const LOG_FORMAT = '%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%s%x1f%b%x1e'
 
 /** 读取提交历史。 */
 async function buildLog(root, options) {
