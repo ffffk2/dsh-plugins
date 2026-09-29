@@ -727,6 +727,80 @@ window.__ModuleLoader__.load({
        * 贮藏操作按钮都禁用，逼用户显式选一次。
        */
       const [stashRef, setStashRef] = React.useState('')
+      /**
+       * 面板常驻容器。用于在「即将卸载当前焦点元素」时把焦点收回来，
+       * 详见 releaseFocus() 的说明——不这么做会让整个应用的键盘输入失效。
+       */
+      const rootRef = React.useRef(null)
+
+      /*
+       * 焦点兜底。
+       *
+       * 这是本插件最容易造成全局故障的一处，机制如下：
+       *   ① 写操作走 run()，它把 busy 置 true，于是面板内 21 个按钮同时被 disabled；
+       *      浏览器会立刻 blur 掉那个「刚变成 disabled」、正持有焦点的按钮，焦点落到 body。
+       *   ② 宿主的焦点保持逻辑（dsh-client-ui-sidebar-right 的 observeSidebarFocus）本可救场，
+       *      但它只在两个条件下动作：元素被**移除**（MutationObserver 只看 childList），
+       *      或 focusout 时焦点已交给别处（relatedTarget !== null）。
+       *      而 disabled 只是改属性、元素并没有被移除，且 focusout 的 relatedTarget 是 null，
+       *      于是宿主走了 `if (event.relatedTarget === null && focused?.element.isConnected)`
+       *      这条分支——直接清空自己记录的焦点并断开观察。
+       *      从此它没有任何可恢复的目标，焦点永久停在 body 上。
+       *   ③ 用户表现就是「操作完打字进不了输入框，点别处也恢复不了」。
+       *
+       * releaseFocus 负责「动之前先挪走」，restoreFocus 负责「动完了再还回来」。
+       * 两者都只在焦点确实属于面板时才插手，用户主动点到别处绝不干预。
+       */
+
+      /** 记下动作开始前焦点是否在面板内，用于事后判断要不要还焦点。 */
+      const captureFocus = React.useCallback(() => {
+        if (typeof document === 'undefined') return false
+        const root = rootRef.current
+        const active = document.activeElement
+        if (root === null || active === null || active === document.body) return false
+        return root.contains(active)
+      }, [])
+
+      /**
+       * 把焦点还给面板常驻容器。
+       *
+       * 只在焦点**已经落空**（body / 无）时才动手：用户若已把焦点放到别处
+       * （比如点了会话输入框），这里必须什么都不做，绝不抢。
+       */
+      const restoreFocus = React.useCallback(() => {
+        if (typeof document === 'undefined') return
+        // 等 React 提交完 DOM 再读 activeElement，否则读到的还是旧值。
+        queueMicrotask(() => {
+          if (typeof document === 'undefined') return
+          const now = document.activeElement
+          if (now !== null && now !== document.body) return
+          const target = rootRef.current
+          if (target === null || !target.isConnected) return
+          // tabindex=-1：可编程聚焦，又不进 Tab 序列，不干扰键盘导航。
+          if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
+          target.focus({ preventScroll: true })
+        })
+      }, [])
+
+      /**
+       * 在「即将卸载当前焦点元素」的状态更新之前，把焦点主动交还给面板根节点。
+       *
+       * 与 run() 里的 capture/restore 互补：那条覆盖「按钮被 disabled」，
+       * 这条覆盖「表单/下拉框整个被卸载」——卸载后再还焦点已经晚了，
+       * 焦点会掉进面板这个 tabindex=-1 的容器里，宿主的恢复判断同样不成立。
+       * @param nodeRef - 指向面板常驻容器的 ref。
+       */
+      function releaseFocus(nodeRef) {
+        if (typeof document === 'undefined') return
+        const active = document.activeElement
+        const root = nodeRef?.current ?? null
+        if (active === null || active === document.body) return
+        if (root !== null && !root.contains(active)) return
+        const target = root ?? document.body
+        if (target === document.body) return
+        if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
+        target.focus({ preventScroll: true })
+      }
 
       // 会话工作目录晚于首次渲染就绪时同步过来（新会话/切工作区都会变）。
       React.useEffect(() => {
@@ -741,6 +815,8 @@ window.__ModuleLoader__.load({
         async (target) => {
           const path = target ?? repoPath
           if (path === '') return
+          // 与 run() 同理：刷新按钮也会因为 busy 被 disabled，焦点必须先收回来。
+          const hadFocus = captureFocus()
           setBusy(true)
           try {
             const payload = await api.status(path)
@@ -760,9 +836,10 @@ window.__ModuleLoader__.load({
             setError(cause instanceof Error ? cause.message : String(cause))
           } finally {
             setBusy(false)
+            if (hadFocus) restoreFocus()
           }
         },
-        [repoPath],
+        [repoPath, captureFocus, restoreFocus],
       )
 
       React.useEffect(() => {
@@ -824,6 +901,9 @@ window.__ModuleLoader__.load({
       /** 统一的写操作入口：跑完顺手刷新状态。 */
       const run = React.useCallback(
         async (action, payload, successKey) => {
+          // 必须在 setBusy(true) **之前**判断：一旦 busy 生效，正持有焦点的按钮
+          // 立刻被 disabled，浏览器随即 blur 它，此刻再读 activeElement 已经晚了。
+          const hadFocus = captureFocus()
           setBusy(true)
           setError(null)
           try {
@@ -848,9 +928,11 @@ window.__ModuleLoader__.load({
             return null
           } finally {
             setBusy(false)
+            // 只有「动之前在面板里、动完焦点丢了」才还焦点；用户自己点到别处就不碰。
+            if (hadFocus) restoreFocus()
           }
         },
-        [repoPath, loadBranches],
+        [repoPath, loadBranches, captureFocus, restoreFocus],
       )
 
       const openDiff = React.useCallback(
@@ -909,6 +991,18 @@ window.__ModuleLoader__.load({
       )
 
       /**
+       * 贮藏当前更改。
+       *
+       * 「贮藏更改」按钮只在 `unstaged.length > 0` 时渲染 —— 贮藏成功后工作区变干净，
+       * 这个按钮连同它的焦点会一起被卸载。所以要先 releaseFocus，
+       * 再把焦点交出去，否则焦点掉进面板容器，整个应用都打不了字。
+       */
+      const stashSave = React.useCallback(async () => {
+        releaseFocus(rootRef)
+        await run('stash-save', {}, null)
+      }, [run])
+
+      /**
        * 应用 / 恢复 / 删除选中的贮藏。
        *
        * 三种操作都可能改工作区或丢数据，都不做静默，一律先确认；
@@ -926,9 +1020,35 @@ window.__ModuleLoader__.load({
           const okKey = kind === 'apply' ? 'stashApplyOk' : kind === 'pop' ? 'stashPopOk' : null
           const result = await run(action, { name: target.ref }, okKey)
           // 选中的那条没了（pop/drop）就清空选择，免得下拉框指着一个不存在的 ref。
-          if (result !== null && kind !== 'apply') setStashRef('')
+          // 这一步会把下拉框的值重置，等于让「当前有焦点的元素」发生变更，
+          // 所以先把焦点从面板内部挪到常驻容器上，别让它落进看不见的地方。
+          if (result !== null && kind !== 'apply') {
+            releaseFocus(rootRef)
+            setStashRef('')
+          }
         },
         [run, selectedStash],
+      )
+
+      /**
+       * 新建分支：成功后收起表单并切回「更改」页。
+       *
+       * 收起表单 = 卸载那个 autoFocus 的输入框（或承载焦点的「创建」按钮），
+       * 所以必须先 releaseFocus，否则焦点会掉进面板容器里，整个应用都打不了字。
+       * @param name - 新分支名。
+       * @param startPoint - 起点分支；空串表示当前 HEAD。
+       */
+      const createBranch = React.useCallback(
+        async (name, startPoint) => {
+          if (name === '') return
+          releaseFocus(rootRef)
+          const result = await run('create-branch', { name, startPoint }, null)
+          if (result === null) return
+          setNewBranch(null)
+          void loadBranches()
+          setTab('changes')
+        },
+        [run, loadBranches],
       )
 
       // ---- 空状态：还不是仓库 ----
@@ -1097,7 +1217,7 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dshg-btn', type: 'button', disabled: busy || message.trim() === '', onClick: () => void run('commit-amend', { message }) }, t('commitAmend')),
             h('span', { className: 'dshg-spacer' }),
             unstaged.length > 0
-              ? h('button', { className: 'dshg-btn', type: 'button', disabled: busy, onClick: () => void run('stash-save', {}, null) }, t('stashSave'))
+              ? h('button', { className: 'dshg-btn', type: 'button', disabled: busy, onClick: () => void stashSave() }, t('stashSave'))
               : null,
           ),
           status.stashes !== undefined && status.stashes.length > 0
@@ -1329,13 +1449,12 @@ window.__ModuleLoader__.load({
                   onChange: (event) => setNewBranch({ ...newBranch, name: event.target.value }),
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' && newBranch.name.trim() !== '') {
-                      void run('create-branch', { name: newBranch.name.trim(), startPoint: newBranch.startPoint }, null).then(() => {
-                        setNewBranch(null)
-                        void loadBranches()
-                        setTab('changes')
-                      })
+                      void createBranch(newBranch.name.trim(), newBranch.startPoint)
                     }
-                    if (event.key === 'Escape') setNewBranch(null)
+                    if (event.key === 'Escape') {
+                      releaseFocus(rootRef)
+                      setNewBranch(null)
+                    }
                   },
                 }),
                 h(
@@ -1344,16 +1463,23 @@ window.__ModuleLoader__.load({
                     className: 'dshg-btn',
                     type: 'button',
                     disabled: newBranch.name.trim() === '' || busy,
-                    onClick: () =>
-                      void run('create-branch', { name: newBranch.name.trim(), startPoint: newBranch.startPoint }, null).then(() => {
-                        setNewBranch(null)
-                        void loadBranches()
-                        setTab('changes')
-                      }),
+                    onClick: () => void createBranch(newBranch.name.trim(), newBranch.startPoint),
                   },
                   t('create'),
                 ),
-                h('button', { className: 'dshg-btn', type: 'button', onClick: () => setNewBranch(null) }, t('cancel')),
+                h(
+                  'button',
+                  {
+                    className: 'dshg-btn',
+                    type: 'button',
+                    onClick: () => {
+                      // 取消同样会卸载输入框，焦点先还回去。
+                      releaseFocus(rootRef)
+                      setNewBranch(null)
+                    },
+                  },
+                  t('cancel'),
+                ),
               ),
               h(
                 'div',
@@ -1464,7 +1590,7 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'dshg-root' },
+        { className: 'dshg-root', ref: rootRef },
         h('style', { key: 'style' }, CSS),
         topBar,
         tabsBar,

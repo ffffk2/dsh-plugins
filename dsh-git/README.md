@@ -169,8 +169,36 @@ node dsh-git\smoke.mjs   # 通过时打印 ALL PASS
 
 冒烟测试两半都跑：Host 侧验证解析器（porcelain `-z`、log 字段流）、路径闸门，
 并真的对一个**临时 git 仓库**做完整流程（暂存 → 提交 → 改文件 → 看 diff →
-新建分支 → 放弃修改）；Client 侧在 Node 里用极简 React 真跑注册契约与渲染，
-断言中英文字典键一致、CSS 里没有硬编码颜色、只依赖 `react`。
+新建分支 → 放弃修改 → 丢弃/删除 → 贮藏）；Client 侧在 Node 里用极简 React + 极简 DOM
+真跑注册契约、渲染与**焦点兜底**，断言中英文字典键一致、CSS 里没有硬编码颜色、只依赖 `react`。
+
+### 焦点必须自己兜住（改这个插件时务必留意）
+
+写操作会把 `busy` 置 true，面板内 21 个按钮随之 `disabled`。浏览器会立刻 blur
+掉那个正持有焦点的按钮，焦点落到 `body`；而宿主的焦点恢复逻辑
+（`dsh-client-ui-sidebar-right` 的 `observeSidebarFocus`）在这种情况下救不了场：
+
+- 它的 `MutationObserver` 只看 `childList`，而 `disabled` 只是改属性、元素并未移除；
+- `focusout` 里 `relatedTarget === null` 且元素 `isConnected` 时，它**直接清掉自己记录
+  的焦点并断开观察**（`if (event.relatedTarget === null && focused?.element.isConnected)`）。
+
+于是宿主再无任何可恢复的目标，焦点永久停在 `body`：表现为「操作完打字进不了输入框，
+点别处也恢复不了」。同理，任何被 `setState` **卸载**的控件（新建分支表单、贮藏下拉框、
+「贮藏更改」按钮）也会制造同样的问题。
+
+因此 `client.js` 里有两条互补的兜底，改动相关代码时不要删：
+
+| 函数 | 覆盖场景 | 时机 |
+|---|---|---|
+| `captureFocus` / `restoreFocus` | 按钮被 `disabled` | `run()` / `refresh()` 里，`setBusy(true)` **前后** |
+| `releaseFocus(rootRef)` | 控件被卸载 | `setState` 卸载控件**之前** |
+
+`captureFocus` 必须在 `setBusy(true)` 之前调用——一旦 `busy` 生效，浏览器已经把焦点
+blur 掉了，那时再读 `document.activeElement` 就晚了。`restoreFocus` 只在焦点**已经落空**
+（`body` / 无）时才动手，用户主动点到会话输入框等处时绝不抢。
+
+`smoke.mjs` 为此内置了一个极简 DOM（`makeDom`），并把「焦点不能停在 body」
+「用户点到面板外时不抢焦点」都写成了断言，还用变异测试验证过它们真的会失败。
 
 `DSH_SMOKE_DEBUG=1` 会打印渲染出的 HTML 摘要。
 

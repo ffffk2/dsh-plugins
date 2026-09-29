@@ -139,6 +139,16 @@ function textOf(node) {
   return ''
 }
 
+/** 当前渲染所属的极简 DOM（由 loadPlugin 建好），以及本次渲染的 DOM 挂载点。 */
+let currentDom = null
+let domParent = null
+
+/** 递归把一棵子树标记成「已从文档移除」，模拟 React 卸载。 */
+function markDisconnected(element) {
+  element.isConnected = false
+  for (const child of element.children ?? []) markDisconnected(child)
+}
+
 function render(node) {
   if (node === null || node === undefined || node === false || node === true) return ''
   if (typeof node === 'string' || typeof node === 'number') return escapeHtml(node)
@@ -165,9 +175,13 @@ function render(node) {
     if (type === activeRoot) rootHooks = produced
     return render(out)
   }
+  // 宿主元素：同时在极简 DOM 里建一份，供焦点逻辑使用。
+  const parent = domParent
+  const element = currentDom === null ? null : currentDom.createElement(String(type), parent)
+  if (element !== null && typeof props.ref === 'object' && props.ref !== null) props.ref.current = element
   const attrs = []
   for (const [name, value] of Object.entries(props)) {
-    if (name === 'children' || value === undefined || value === null) continue
+    if (name === 'children' || name === 'ref' || value === undefined || value === null) continue
     if (name.startsWith('on') && typeof value === 'function') {
       handlers.push({ tag: type, attrs: { ...props, children }, event: name, handler: value })
       continue
@@ -181,8 +195,13 @@ function render(node) {
     if (value === true) { attrs.push(name); continue }
     attrs.push(`${name}="${escapeHtml(value)}"`)
   }
+  const savedParent = domParent
+  domParent = element ?? parent
   const body = render(children)
-  return `<${type}${attrs.length ? ' ' + attrs.join(' ') : ''}>${body}</${type}>`
+  domParent = savedParent
+  if (element === null) return `<${type}${attrs.length ? ' ' + attrs.join(' ') : ''}>${body}</${type}>`
+  element.html = `<${type}${attrs.length ? ' ' + attrs.join(' ') : ''}>${body}</${type}>`
+  return element.html
 }
 
 /** 当前作为「实例」被反复重渲染的顶层组件；它的 hook 状态跨渲染保留。 */
@@ -202,6 +221,15 @@ function mount(component, props) {
     handlers = []
     hooks = rootHooks
     hookIndex = 0
+    // 每轮渲染重建 DOM 树：模拟 React 卸载旧子树、挂载新子树。
+    // 焦点兜底逻辑要知道「原来的焦点元素还在不在」，所以这棵树必须是真的：
+    // 旧节点标记为断开并从 body 移除，否则 children 会越堆越多，
+    // rootRef.current 也会指到一个早就过期的节点上。
+    if (currentDom !== null) {
+      for (const child of currentDom.body.children) markDisconnected(child)
+      currentDom.body.children.length = 0
+    }
+    domParent = currentDom?.body ?? null
     const html = render(React.createElement(component, nextProps ?? props))
     rootHooks = hooks
     return html
@@ -211,6 +239,78 @@ function mount(component, props) {
 }
 
 // ---------- 装载 client.js ----------
+
+/**
+ * 极简 DOM：只实现插件焦点兜底逻辑用到的那几个 API。
+ *
+ * 为什么非要有它：client.js 的焦点逻辑全部写在 `typeof document === 'undefined'`
+ * 的守卫后面。不给 document，那些分支在测试里永远走不到 —— 焦点一旦丢失就会
+ * 卡死整个应用的键盘输入，这种 bug 不能靠「代码看起来对」来保证。
+ *
+ * 只实现被真正用到的部分，不做通用 DOM：
+ *   document.activeElement / document.body、元素上的
+ *   focus() / contains() / hasAttribute() / setAttribute() / isConnected。
+ * 语义按浏览器来：focus() 会改 activeElement；contains() 沿 parent 链向上找。
+ */
+function makeDom() {
+  const body = {
+    tag: 'body',
+    parent: null,
+    attrs: new Set(),
+    isConnected: true,
+    children: [],
+  }
+  body.contains = (node) => {
+    for (let cursor = node; cursor !== null && cursor !== undefined; cursor = cursor.parent) {
+      if (cursor === body) return true
+    }
+    return false
+  }
+  const document = {
+    activeElement: body,
+    body,
+    /** 记录每次 .focus()，断言「焦点被还回去了」时直接看它。 */
+    focusLog: [],
+    querySelectorAll: () => [],
+  }
+  body.focus = function focus() {
+    document.activeElement = body
+    document.focusLog.push('body')
+  }
+  /**
+   * 造一个可作为面板容器的元素。
+   * @param tag - 标签名，仅用于调试可读性。
+   * @param parent - 父元素，默认挂在 body 下。
+   */
+  function createElement(tag, parent = body) {
+    const element = {
+      tag,
+      parent,
+      attrs: new Set(),
+      isConnected: true,
+      children: [],
+    }
+    element.contains = (node) => {
+      for (let cursor = node; cursor !== null && cursor !== undefined; cursor = cursor.parent) {
+        if (cursor === element) return true
+      }
+      return false
+    }
+    element.hasAttribute = (name) => element.attrs.has(name)
+    element.setAttribute = (name, value) => {
+      element.attrs.add(name)
+      element.attrValues = { ...(element.attrValues ?? {}), [name]: value }
+    }
+    element.focus = () => {
+      document.activeElement = element
+      document.focusLog.push(tag)
+    }
+    if (parent !== null) parent.children.push(element)
+    return element
+  }
+  return { document, body, createElement }
+}
+
 function loadPlugin() {
   let captured = null
   const sandboxWindow = {
@@ -221,8 +321,11 @@ function loadPlugin() {
   // ReferenceError，而被组件的 try/catch 吞成一句错误提示——极难排查。
   // fetch 走一层转发，这样测试里替换 globalThis.fetch 立刻生效。
   const sandboxFetch = (...args) => globalThis.fetch(...args)
+  const dom = makeDom()
   const context = vm.createContext({
     window: sandboxWindow,
+    document: dom.document,
+    queueMicrotask,
     console,
     React,
     fetch: sandboxFetch,
@@ -234,13 +337,14 @@ function loadPlugin() {
     TextDecoder,
   })
   context.globalThis = context
+  currentDom = dom
   vm.runInContext(fs.readFileSync(CLIENT, 'utf8'), context, { filename: 'client.js' })
   if (captured === null) throw new Error('client.js 没有调用 window.__ModuleLoader__.load')
   const moduleFace = captured.factory((name) => {
     if (name === 'react') return React
     throw new Error(`未预期的 require("${name}")`)
   })
-  return { definition: captured, moduleFace, sandboxWindow }
+  return { definition: captured, moduleFace, sandboxWindow, dom }
 }
 
 function makeContext() {
@@ -283,10 +387,13 @@ group('Client 注册契约')
 let moduleFace
 /** 组件里那个 vm 沙箱自己的 window：客户端代码读的是它，不是宿主 globalThis。 */
 let sandboxWindow
+/** 组件所在的极简 DOM：焦点相关的回归断言直接查它。 */
+let sandboxDom
 {
   const loaded = loadPlugin()
   moduleFace = loaded.moduleFace
   sandboxWindow = loaded.sandboxWindow
+  sandboxDom = loaded.dom
   expect('module id 与包名一致', loaded.definition.id === '@local/dsh-git', loaded.definition.id)
   expect(
     'inject 声明 slots/locale/sidebarRightTabs',
@@ -580,6 +687,79 @@ group('面板渲染')
   } finally {
     globalThis.fetch = originalFetch
     delete sandboxWindow.confirm
+  }
+
+  // (b5) 焦点兜底：写操作期间面板按钮会被 disabled，浏览器随即 blur 掉持有焦点的按钮，
+  //   而宿主的焦点恢复逻辑在这种「元素还在、只是被禁用」的情况下不会救场
+  //   （它只看 childList 移除，且 focusout 的 relatedTarget 为 null 时会直接清掉状态）。
+  //   结果就是焦点永久停在 body 上，用户「打字进不了输入框，点哪都恢复不了」。
+  //   这一段钉住两件事：动作后焦点被还回面板容器；用户自己点了别处时绝不抢焦点。
+  const focusStub = {
+    ...stubbed,
+    files: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    staged: [],
+    unstaged: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    stashes: [],
+    clean: false,
+  }
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    let payload = {}
+    if (text.includes('/git/status')) payload = focusStub
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: focusStub }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    const stageAll = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'stageAll')
+    expect('找得到全部暂存按钮（焦点用例）', stageAll !== undefined)
+    const rootElement = sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+    expect('面板根容器进了 DOM 树（ref 生效）', rootElement !== undefined, sandboxDom.body.children.map((item) => item.tag))
+
+    if (rootElement !== undefined && stageAll !== undefined) {
+      // 用挂在面板根下的子元素代表「持有焦点的按钮」。
+      const fakeButton = sandboxDom.createElement('button', rootElement)
+      fakeButton.focus()
+      sandboxDom.document.focusLog.length = 0
+
+      stageAll.handler({})
+      // 真实浏览器会在按钮变成 disabled 的那一刻 blur 它，焦点落到 body。
+      // 替身不会自动做这件事，所以这里把这一步显式演出来——否则测不到真正的场景。
+      sandboxDom.document.activeElement = sandboxDom.body
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      expect('动作后焦点没有停在 body', sandboxDom.document.activeElement !== sandboxDom.body, String(sandboxDom.document.activeElement?.tag))
+      expect('确实对面板容器调用过 focus()', sandboxDom.document.focusLog.includes('div'), sandboxDom.document.focusLog)
+      expect('面板容器带上 tabindex=-1（可编程聚焦且不进 Tab 序列）', rootElement.hasAttribute('tabindex') === true)
+
+      // 反向用例：用户自己把焦点放到了别处（比如会话输入框），此时绝不能被抢走。
+      const elsewhere = sandboxDom.createElement('textarea', sandboxDom.body)
+      instance.rerender(hostProps('D:/demo'))
+      const stageAll2 = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'stageAll')
+      const rootElement2 = sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+      if (stageAll2 !== undefined && rootElement2 !== undefined) {
+        // 动作开始时焦点在面板里（captureFocus 记录为 true）……
+        const insideButton = sandboxDom.createElement('button', rootElement2)
+        insideButton.focus()
+        stageAll2.handler({})
+        // ……但动作期间用户点到了面板外面。
+        elsewhere.focus()
+        sandboxDom.document.focusLog.length = 0
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        expect('用户已把焦点移到面板外时不抢焦点', sandboxDom.document.activeElement === elsewhere, String(sandboxDom.document.activeElement?.tag))
+      }
+    }
+  } catch (error) {
+    expect('焦点用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
   }
 
   // (c) 标题槽位：渲染出名字，且不依赖任何 props.view。
