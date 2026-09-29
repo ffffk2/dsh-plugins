@@ -12,7 +12,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
@@ -231,7 +231,7 @@ function loadPlugin() {
     if (name === 'react') return React
     throw new Error(`未预期的 require("${name}")`)
   })
-  return { definition: captured, moduleFace }
+  return { definition: captured, moduleFace, sandboxWindow }
 }
 
 function makeContext() {
@@ -272,9 +272,12 @@ function makeContext() {
 // ---------- 用例 1：注册契约 ----------
 group('Client 注册契约')
 let moduleFace
+/** 组件里那个 vm 沙箱自己的 window：客户端代码读的是它，不是宿主 globalThis。 */
+let sandboxWindow
 {
   const loaded = loadPlugin()
   moduleFace = loaded.moduleFace
+  sandboxWindow = loaded.sandboxWindow
   expect('module id 与包名一致', loaded.definition.id === '@local/dsh-git', loaded.definition.id)
   expect(
     'inject 声明 slots/locale/sidebarRightTabs',
@@ -452,6 +455,56 @@ group('面板渲染')
   expect('文件行渲染出状态字母 M', (html.match(/dshg-k-modified/g) ?? []).length >= 2)
   expect('未跟踪文件用 U 字母', html.includes('>U<'))
   expect('行内暂存/取消暂存按钮都在', html.includes(`${PREFIX}file-actions`))
+
+  // (b2) 丢弃相关：这几个是回归用例，钉住两个曾经出错的点。
+  //   ① 「更改」分组旁边要有一个「全部丢弃」按钮，和「全部暂存」并排；
+  //   ② 未跟踪文件的丢弃按钮必须是**删除**语义 —— 图标 ✕、标题 deleteUntracked，
+  //      不能沿用已跟踪文件的 ↺ / discard。git 里未跟踪文件只能删，没有还原一说。
+  expect('更改分组有「全部暂存」入口', html.includes('title="stageAll"'))
+  expect('更改分组有「全部丢弃」按钮', html.includes('title="discardAll"'))
+  expect('全部丢弃按钮与全部暂存并排', html.indexOf('title="discardAll"') < html.indexOf('title="stageAll"'))
+  expect('未跟踪行的丢弃按钮是删除语义', html.includes('title="deleteUntracked"'))
+  expect('已跟踪行的丢弃按钮仍是放弃语义', html.includes('title="discard"'))
+  expect('未跟踪行用删除图标 ✕', html.includes('>✕<'))
+  expect('已跟踪行用还原图标 ↺', html.includes('>↺<'))
+
+  // (b3) 点「全部丢弃」→ 必须带上确认，且确认后发出 discard-all 动作。
+  //      用 DSH_SMOKE_DEBUG=1 可以看到渲染出的 html。
+  const discardAllButton = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'discardAll')
+  expect('找得到全部丢弃按钮的点击处理器', discardAllButton !== undefined)
+  let prompted = ''
+  const originalConfirm = sandboxWindow.confirm
+  if (discardAllButton !== undefined) {
+    const posts = []
+    globalThis.fetch = async (url, init) => {
+      const text = String(url)
+      requested.push(text)
+      if (init !== undefined && init.method === 'POST') posts.push(JSON.parse(String(init.body)))
+      let payload = {}
+      if (text.includes('/git/status')) payload = stubbed
+      else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+      else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+      else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+      else payload = { ok: true, action: 'discard-all', status: stubbed }
+      return { ok: true, status: 200, json: async () => payload }
+    }
+    // 客户端代码读的是 vm 沙箱里的 window，所以确认框要打在这个对象上，
+    // 顺便记下提示文案；总是返回 true 表示「用户点了确定」。
+    sandboxWindow.confirm = (message) => {
+      prompted = String(message)
+      return true
+    }
+    try {
+      discardAllButton.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalConfirm === undefined) delete sandboxWindow.confirm
+      else sandboxWindow.confirm = originalConfirm
+    }
+    expect('全部丢弃前先弹确认', prompted.includes('discardAllConfirm'), prompted)
+    expect('确认后发出 discard-all 动作', posts.some((body) => body.action === 'discard-all'), posts)
+  }
 
   // (c) 标题槽位：渲染出名字，且不依赖任何 props.view。
   let titleHtml = ''
@@ -726,6 +779,88 @@ group('真实仓库端到端')
     // 空提交信息被拒
     const emptyMessage = await internals.runAction(dir, 'commit', { message: '   ' })
     expect('空提交信息被拒', emptyMessage.ok === false, emptyMessage)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------- 用例 7b：丢弃 / 删除的语义 ----------
+// 这一段是回归用例：未跟踪文件的「丢弃」在 git 里只能是删除。
+// 早先一律用 `checkout -- <file>`，对未跟踪文件必然以
+// `error: pathspec ... did not match any file(s) known to git` 失败，
+// 于是单个丢弃和「全部丢弃」都报错。
+group('丢弃与删除语义')
+{
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-git-discard-'))
+  const run = (args) => execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+  const exists = (name) => existsSync(join(dir, name))
+  // 读出来的文本统一把 CRLF 折成 LF 再比对：Windows 上 git 默认 autocrlf，
+  // 还原回来的行尾是 CRLF，这是 git 的正常行为，不是被丢弃的内容出错。
+  const text = (name) => readFileSync(join(dir, name), 'utf8').replace(/\r\n/g, '\n')
+  try {
+    run(['init'])
+    run(['config', 'user.email', 'smoke@example.com'])
+    run(['config', 'user.name', 'Smoke Test'])
+    run(['config', 'commit.gpgsign', 'false'])
+    writeFileSync(join(dir, '.gitignore'), 'ignored.txt\n')
+    writeFileSync(join(dir, 'a.txt'), 'one\n')
+    run(['add', '-A'])
+    run(['commit', '-m', 'base'])
+
+    // --- 单个丢弃：未跟踪 = 删除 ---
+    writeFileSync(join(dir, 'brand-new.txt'), 'brand\n')
+    writeFileSync(join(dir, 'a.txt'), 'one\nCHANGED\n')
+    const single = await internals.runAction(dir, 'discard', { files: ['brand-new.txt'] })
+    expect('丢弃未跟踪文件不报错', single.ok === true, single.stderr)
+    expect('未跟踪文件被删除', exists('brand-new.txt') === false)
+    expect('只动点名的文件', exists('a.txt') === true)
+
+    // --- 单个丢弃：已跟踪 = 还原内容（不是删除）---
+    const tracked = await internals.runAction(dir, 'discard', { files: ['a.txt'] })
+    expect('丢弃已跟踪文件不报错', tracked.ok === true, tracked.stderr)
+    expect('已跟踪文件被还原而不是删除', exists('a.txt') === true && text('a.txt') === 'one\n', text('a.txt'))
+
+    // --- 一次同时丢弃「已跟踪 + 未跟踪」：两条路径都要走到 ---
+    writeFileSync(join(dir, 'a.txt'), 'one\nCHANGED\n')
+    writeFileSync(join(dir, 'mixed-new.txt'), 'new\n')
+    const mixed = await internals.runAction(dir, 'discard', { files: ['a.txt', 'mixed-new.txt'] })
+    expect('混合丢弃不报错', mixed.ok === true, mixed.stderr)
+    expect('混合丢弃：已跟踪被还原', text('a.txt') === 'one\n')
+    expect('混合丢弃：未跟踪被删除', exists('mixed-new.txt') === false)
+
+    // --- 全部丢弃 ---
+    writeFileSync(join(dir, 'a.txt'), 'one\nCHANGED\n')
+    writeFileSync(join(dir, 'brand-new.txt'), 'brand\n')
+    writeFileSync(join(dir, 'ignored.txt'), 'build output\n')
+    mkdirSync(join(dir, 'newdir'), { recursive: true })
+    writeFileSync(join(dir, 'newdir', 'deep.txt'), 'deep\n')
+    // 新增并已暂存的文件属于「本周期新加的东西」，全部丢弃时也该消失。
+    writeFileSync(join(dir, 'staged-new.txt'), 'staged\n')
+    run(['add', 'staged-new.txt'])
+
+    const all = await internals.runAction(dir, 'discard-all', {})
+    expect('全部丢弃不报错', all.ok === true, all.stderr)
+    const afterAll = await internals.buildStatus(dir)
+    expect('全部丢弃后工作区干净', afterAll.clean === true, afterAll.files)
+    expect('全部丢弃：已跟踪还原', text('a.txt') === 'one\n')
+    expect('全部丢弃：未跟踪删除', exists('brand-new.txt') === false)
+    expect('全部丢弃：新增未跟踪目录也删掉', exists('newdir') === false)
+    expect('全部丢弃：已暂存的新文件也删掉', exists('staged-new.txt') === false)
+    // 被 .gitignore 忽略的文件是构建产物，误删代价最大，必须保留。
+    expect('全部丢弃保留被忽略的文件', exists('ignored.txt') === true)
+
+    // --- 顺序回归：`checkout --` 取的是**索引**而不是 HEAD ---
+    // 若把它放在 `reset HEAD` 之前，它会把「已暂存的修改」写回工作区，
+    // 之后 reset 再重置索引，那些内容就永久留在了工作区 —— 表现为
+    // 「暂存过的改动丢不掉」。这条用例专门钉住这个顺序。
+    writeFileSync(join(dir, 'a.txt'), 'one\nSTAGED-EDIT\n')
+    run(['add', 'a.txt'])
+    writeFileSync(join(dir, 'a.txt'), 'one\nWORKTREE-EDIT\n')
+    const ordered = await internals.runAction(dir, 'discard-all', {})
+    expect('已暂存后又改过的文件也能丢弃', ordered.ok === true, ordered.stderr)
+    expect('丢弃后回到上次提交的内容', text('a.txt') === 'one\n', text('a.txt'))
+    const afterOrder = await internals.buildStatus(dir)
+    expect('丢弃后索引也干净（无残留暂存）', afterOrder.clean === true, afterOrder.files)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

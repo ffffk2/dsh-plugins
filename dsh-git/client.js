@@ -58,6 +58,11 @@ window.__ModuleLoader__.load({
       unstage: '取消暂存',
       discard: '放弃更改',
       discardConfirm: '放弃 {file} 的本地修改？此操作不可撤销。',
+      deleteUntracked: '删除文件',
+      deleteUntrackedConfirm: '删除未跟踪的文件 {file}？文件会从磁盘上移除，此操作不可撤销。',
+      discardAll: '全部丢弃',
+      discardAllConfirm: '放弃所有更改？已跟踪文件还原到上次提交，未跟踪文件将被删除（被 .gitignore 忽略的文件保留）。此操作不可撤销。',
+      discardAllOk: '已丢弃全部更改',
       stageAll: '全部暂存',
       unstageAll: '全部取消暂存',
       commitMessage: '消息（Ctrl+Enter 提交）',
@@ -152,6 +157,11 @@ window.__ModuleLoader__.load({
       unstage: 'Unstage changes',
       discard: 'Discard changes',
       discardConfirm: 'Discard local changes to {file}? This cannot be undone.',
+      deleteUntracked: 'Delete file',
+      deleteUntrackedConfirm: 'Delete the untracked file {file}? It will be removed from disk. This cannot be undone.',
+      discardAll: 'Discard all',
+      discardAllConfirm: 'Discard all changes? Tracked files go back to the last commit and untracked files are deleted (files matching .gitignore are kept). This cannot be undone.',
+      discardAllOk: 'Discarded all changes',
       stageAll: 'Stage all',
       unstageAll: 'Unstage all',
       commitMessage: 'Message (Ctrl+Enter to commit)',
@@ -261,6 +271,8 @@ window.__ModuleLoader__.load({
 .dshg-btn.is-on { color:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
 .dshg-btn.is-icon { width:24px; height:24px; padding:0; justify-content:center; font-size:13px; border-color:transparent; }
 .dshg-btn.is-icon:hover:not([disabled]) { background:var(--dsw-alias-bg-layer-2); }
+/* 删除/丢弃类动作：hover 时用错误色，和「暂存」「新建」这类安全动作区分开。 */
+.dshg-btn.is-danger:hover:not([disabled]) { color:var(--dsw-alias-state-error-primary); border-color:var(--dsw-alias-state-error-primary); }
 
 /* 计数器徽标 */
 .dshg-count { min-width:17px; height:17px; padding:0 5px; border-radius:9px; font-size:10px; line-height:17px; text-align:center; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
@@ -562,6 +574,10 @@ window.__ModuleLoader__.load({
     /** 一行文件：名字 + 状态字母 + hover 动作。 */
     function FileRow({ file, staged, active, onOpen, onStage, onUnstage, onDiscard }) {
       const { dir, name } = splitPath(file.path)
+      // 未跟踪文件的「丢弃」其实是删除：git 里没有它的任何备份，host 侧会走 clean -f。
+      // 图标与文案都跟着改，否则用户以为只是还原，实际文件没了。
+      const removes = file.kind === 'untracked'
+      const actionLabel = removes ? t('deleteUntracked') : t('discard')
       return h(
         'div',
         {
@@ -584,7 +600,7 @@ window.__ModuleLoader__.load({
           staged
             ? h('button', { className: 'dshg-btn is-icon', type: 'button', title: t('unstage'), 'aria-label': t('unstage'), onClick: () => onUnstage(file) }, '−')
             : h('button', { className: 'dshg-btn is-icon', type: 'button', title: t('stage'), 'aria-label': t('stage'), onClick: () => onStage(file) }, '+'),
-          h('button', { className: 'dshg-btn is-icon', type: 'button', title: t('discard'), 'aria-label': t('discard'), onClick: () => onDiscard(file) }, '↺'),
+          h('button', { className: 'dshg-btn is-icon', type: 'button', title: actionLabel, 'aria-label': actionLabel, onClick: () => onDiscard(file) }, removes ? '✕' : '↺'),
         ),
       )
     }
@@ -842,11 +858,19 @@ window.__ModuleLoader__.load({
 
       const discard = React.useCallback(
         async (file) => {
-          if (typeof window.confirm === 'function' && !window.confirm(fmt('discardConfirm', { file: file.path }))) return
+          // 未跟踪文件的确认语必须说「删除」：那条路径确实是把文件从磁盘上抹掉，
+          // 沿用「放弃修改」会让用户以为是可逆的还原。
+          const key = file.kind === 'untracked' ? 'deleteUntrackedConfirm' : 'discardConfirm'
+          if (typeof window.confirm === 'function' && !window.confirm(fmt(key, { file: file.path }))) return
           await run('discard', { files: [file.path] })
         },
         [run],
       )
+
+      const discardAll = React.useCallback(async () => {
+        if (typeof window.confirm === 'function' && !window.confirm(t('discardAllConfirm'))) return
+        await run('discard-all', {}, 'discardAllOk')
+      }, [run])
 
       // ---- 空状态：还不是仓库 ----
       if (repoPath === '' || status === null) {
@@ -1082,7 +1106,10 @@ window.__ModuleLoader__.load({
                   onToggle: () => setChangesOpen((value) => !value),
                   actions:
                     unstaged.length > 0
-                      ? h('button', { className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('stageAll'), 'aria-label': t('stageAll'), onClick: () => void run('stage-all', {}, null) }, '+')
+                      ? [
+                          h('button', { key: 'discard-all', className: 'dshg-btn is-icon is-danger', type: 'button', disabled: busy, title: t('discardAll'), 'aria-label': t('discardAll'), onClick: () => void discardAll() }, '⌫'),
+                          h('button', { key: 'stage-all', className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('stageAll'), 'aria-label': t('stageAll'), onClick: () => void run('stage-all', {}, null) }, '+'),
+                        ]
                       : null,
                 },
                 unstaged.map((file) =>
