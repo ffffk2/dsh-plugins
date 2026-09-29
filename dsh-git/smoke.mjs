@@ -77,15 +77,25 @@ const React = {
       },
     ]
   },
-  useEffect(fn) {
+  useEffect(fn, deps) {
     const index = hookIndex++
     const slot = hooks
-    if (slot.length <= index) {
-      slot[index] = true
-      // 副作用返回的清理函数在静态渲染里没有意义，但要防止它被当成新 hook 值。
-      const result = fn()
-      if (typeof result === 'function') slot[index] = result
-    }
+    // 依赖数组按浅比较决定要不要重跑，跟真实 React 一致：
+    // 组件里「切到某个页签才去拉数据」这类 effect 全靠它，不实现的话
+    // 那些分支在测试里永远走不到。
+    const previous = slot[index]
+    const changed =
+      previous === undefined ||
+      !Array.isArray(deps) ||
+      !Array.isArray(previous.deps) ||
+      deps.length !== previous.deps.length ||
+      deps.some((value, position) => !Object.is(value, previous.deps[position]))
+    if (!changed) return
+    slot[index] = { deps, cleanup: undefined }
+    // 副作用返回的清理函数先记下，下次重跑前调用。
+    if (typeof previous?.cleanup === 'function') previous.cleanup()
+    const result = fn()
+    if (typeof result === 'function') slot[index].cleanup = result
   },
   useMemo(fn) {
     const index = hookIndex++
@@ -109,6 +119,15 @@ const React = {
 
 function escapeHtml(text) {
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** 收集一个元素子树里的纯文本，用来按文案找按钮。 */
+function textOf(node) {
+  if (node === null || node === undefined || node === false || node === true) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  if (typeof node === 'object') return textOf(node.children)
+  return ''
 }
 
 function render(node) {
@@ -442,6 +461,136 @@ group('面板渲染')
     expect('标题渲染不报错', false, error.message)
   }
   expect('标题渲染出文案', titleHtml.includes('tabTitle'), titleHtml)
+
+  // (d) 分支页：新建分支表单要给出「起点分支」选择，以及合并策略开关。
+  //     这两个是后加的功能，用渲染断言钉住入口不会在重构里丢掉。
+  const branchRequested = []
+  const branchStub = {
+    locals: [
+      { name: 'main', hash: 'aaa', date: '2024-01-01T00:00:00+08:00', subject: 'base', upstream: 'origin/main', current: true },
+      { name: 'develop', hash: 'bbb', date: '2024-01-02T00:00:00+08:00', subject: 'dev', upstream: null, current: false },
+    ],
+    remotes: [{ name: 'origin/main', hash: 'aaa', date: '2024-01-01T00:00:00+08:00', subject: 'base', upstream: null, current: false }],
+    error: null,
+  }
+  globalThis.fetch = async (url) => {
+    const text = String(url)
+    branchRequested.push(text)
+    let payload = {}
+    if (text.includes('/git/status')) payload = stubbed
+    else if (text.includes('/git/branches')) payload = branchStub
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/diff')) payload = { file: 'a', diff: '', truncated: false, error: null }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  let branchHtml = ''
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+    // 切到「分支」页签：找那个 label 为 branches 的按钮并点它。
+    const branchTabButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.className ?? '').includes('dshg-tab') && textOf(entry.attrs.children) === 'branches')
+    expect('找得到分支页签按钮', branchTabButton !== undefined)
+    branchTabButton?.handler({})
+    // 分支列表是异步拉的，而且要在 tab 状态生效后的那次渲染里才会被 effect 取。
+    // 多渲染几轮把「点击 → 重渲染 → effect 拉数据 → 数据落 state → 再渲染」走完。
+    for (let round = 0; round < 4; round += 1) {
+      branchHtml = instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    branchHtml = instance.rerender(hostProps('D:/demo'))
+  } catch (error) {
+    expect('分支页渲染不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  if (DEBUG) console.log('  分支页 html 摘要：', branchHtml.slice(0, 400))
+  expect('分支页拉取了分支列表', branchRequested.some((url) => url.includes('/git/branches')))
+  expect('分支页有新建分支按钮', branchHtml.includes('createBranch'))
+  expect('分支页有合并策略开关', branchHtml.includes('mergeFastForward') || branchHtml.includes('mergeNoFf'))
+  expect('分支页列出了本地分支', branchHtml.includes('develop'))
+  expect('分支页列出了远程分支', branchHtml.includes('origin/main'))
+  expect('非当前分支有合并按钮', branchHtml.includes('⇥'))
+  expect('当前分支不显示合并/切换/删除', (branchHtml.match(/dshg-branch is-current/g) ?? []).length >= 1)
+
+  // (e) 交互闭环：选出起点 → 建分支，断言起点真的被发给了后端。
+  //     只断言「下拉框存在」是不够的——曾经把 startPoint 从请求里漏掉，
+  //     界面看起来完全正常，但功能静默失效。
+  const posts = []
+  const originalFetch2 = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    const text = String(url)
+    let payload = {}
+    if (text.includes('/git/status')) payload = stubbed
+    else if (text.includes('/git/branches')) payload = branchStub
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    if (options?.method === 'POST') posts.push(JSON.parse(options.body))
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    for (let round = 0; round < 4; round += 1) {
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    const branchTab = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.className ?? '').includes('dshg-tab') && textOf(entry.attrs.children) === 'branches')
+    branchTab?.handler({})
+    for (let round = 0; round < 4; round += 1) {
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+
+    // 点开新建分支表单
+    const createToggle = handlers.find((entry) => entry.event === 'onClick' && textOf(entry.attrs.children) === '+ createBranch')
+    expect('找得到新建分支按钮', createToggle !== undefined, textOf(createToggle?.attrs?.children))
+    createToggle?.handler({})
+    for (let round = 0; round < 3; round += 1) {
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+
+    // 填分支名
+    const nameInput = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'newBranchPlaceholder')
+    expect('找得到分支名输入框', nameInput !== undefined)
+    nameInput?.handler({ target: { value: 'feat/new-one' } })
+    for (let round = 0; round < 3; round += 1) {
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+
+    // 选起点（远程分支）
+    const sourceSelect = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'startPoint')
+    expect('找得到起点下拉框', sourceSelect !== undefined)
+    sourceSelect?.handler({ target: { value: 'origin/main' } })
+    for (let round = 0; round < 3; round += 1) {
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+
+    // 点「创建」
+    const confirmCreate = handlers.find((entry) => entry.event === 'onClick' && textOf(entry.attrs.children) === 'create')
+    expect('找得到创建按钮', confirmCreate !== undefined)
+    confirmCreate?.handler({})
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    const createPost = posts.find((entry) => entry.action === 'create-branch')
+    expect('发出了 create-branch 请求', createPost !== undefined, posts.map((entry) => entry.action))
+    expect('分支名进入请求', createPost?.name === 'feat/new-one', createPost)
+    expect('起点分支进入请求（关键回归）', createPost?.startPoint === 'origin/main', createPost)
+
+    // 点某个非当前分支的合并按钮，断言合并请求带上分支与策略。
+    posts.length = 0
+    const mergeButton = handlers.find((entry) => entry.event === 'onClick' && (entry.attrs.title ?? '').startsWith('merge '))
+    expect('找得到合并按钮', mergeButton !== undefined, mergeButton?.attrs?.title)
+    mergeButton?.handler({})
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    const mergePost = posts.find((entry) => entry.action === 'merge')
+    expect('发出了 merge 请求', mergePost !== undefined, posts.map((entry) => entry.action))
+    expect('合并目标进入请求', mergePost?.name === 'develop', mergePost)
+    expect('合并策略进入请求', mergePost?.ffOnly === true, mergePost)
+  } finally {
+    globalThis.fetch = originalFetch2
+  }
 }
 
 // ---------- 用例 5：无硬编码颜色 + 只用宿主 token ----------
@@ -577,6 +726,108 @@ group('真实仓库端到端')
     // 空提交信息被拒
     const emptyMessage = await internals.runAction(dir, 'commit', { message: '   ' })
     expect('空提交信息被拒', emptyMessage.ok === false, emptyMessage)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------- 用例 8：从指定起点建分支 + 合并 ----------
+group('起点分支与合并')
+{
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-git-merge-'))
+  const run = (args) => execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim()
+  const tryRun = (args) => {
+    try {
+      return run(args)
+    } catch {
+      return ''
+    }
+  }
+  try {
+    run(['init', '-q'])
+    run(['config', 'user.email', 'smoke@example.com'])
+    run(['config', 'user.name', 'Smoke Test'])
+    run(['config', 'commit.gpgsign', 'false'])
+    writeFileSync(join(dir, 'f.txt'), 'base\n')
+    run(['add', '-A'])
+    run(['commit', '-qm', 'base'])
+    const baseBranch = tryRun(['rev-parse', '--abbrev-ref', 'HEAD'])
+
+    // 造一个裸远程，用真实的 origin/<branch> 测「从远端分支建」
+    const origin = mkdtempSync(join(tmpdir(), 'dsh-git-origin-'))
+    execFileSync('git', ['init', '--bare', '-q'], { cwd: origin })
+    run(['remote', 'add', 'origin', origin])
+    run(['push', '-q', '-u', 'origin', 'HEAD'])
+
+    // (1) 从本地分支建
+    run(['branch', 'develop'])
+    let result = await internals.runAction(dir, 'create-branch', { name: 'feat/from-local', startPoint: 'develop' })
+    expect('从本地分支建分支成功', result.ok === true, result.stderr)
+    expect('建完切到了新分支', tryRun(['rev-parse', '--abbrev-ref', 'HEAD']) === 'feat/from-local')
+    run(['checkout', '-q', baseBranch])
+
+    // (2) 从远程分支建：起点是 origin/<base>，且不该顺手绑定上游
+    result = await internals.runAction(dir, 'create-branch', { name: 'feat/from-remote', startPoint: `origin/${baseBranch}` })
+    expect('从远程分支建分支成功', result.ok === true, result.stderr)
+    expect('起点取的是远程分支的提交', tryRun(['rev-parse', 'HEAD']) === tryRun(['rev-parse', `origin/${baseBranch}`]))
+    expect('不隐式绑定上游（--no-track）', tryRun(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']) === '', tryRun(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']))
+    run(['checkout', '-q', baseBranch])
+
+    // (3) 不给起点 = 从当前 HEAD 建（保持原有行为）
+    result = await internals.runAction(dir, 'create-branch', { name: 'feat/no-point' })
+    expect('不给起点时从 HEAD 建', result.ok === true && tryRun(['rev-parse', '--abbrev-ref', 'HEAD']) === 'feat/no-point', result.stderr)
+    run(['checkout', '-q', baseBranch])
+
+    // (4) 分叉出一条线，测快进合并
+    run(['checkout', '-q', '-b', 'topic', baseBranch])
+    writeFileSync(join(dir, 'topic.txt'), 'topic\n')
+    run(['add', '-A'])
+    run(['commit', '-qm', 'topic work'])
+    run(['checkout', '-q', baseBranch])
+    result = await internals.runAction(dir, 'merge', { name: 'topic', ffOnly: true })
+    expect('快进合并成功', result.ok === true, result.stderr)
+    expect('快进后是线性历史（无合并提交）', tryRun(['log', '--merges', '--oneline', '-1']) === '', tryRun(['log', '--merges', '--oneline', '-1']))
+
+    // (5) 再分叉一条，测强制合并提交
+    run(['checkout', '-q', '-b', 'topic2', baseBranch])
+    writeFileSync(join(dir, 'topic2.txt'), 'topic2\n')
+    run(['add', '-A'])
+    run(['commit', '-qm', 'topic2 work'])
+    run(['checkout', '-q', baseBranch])
+    result = await internals.runAction(dir, 'merge', { name: 'topic2' })
+    expect('强制合并提交成功', result.ok === true, result.stderr)
+    expect('产生了合并提交', tryRun(['log', '--merges', '--oneline', '-1']) !== '', tryRun(['log', '--oneline', '-3']))
+
+    // (6) 冲突：合并失败 + merging 标志 + 冲突分类 + 放弃合并
+    const before = await internals.buildStatus(dir)
+    expect('未合并时 merging 为 false', before.merging === false, before.merging)
+
+    run(['checkout', '-q', '-b', 'conflict-side', baseBranch])
+    writeFileSync(join(dir, 'f.txt'), 'side version\n')
+    run(['commit', '-qam', 'side change'])
+    run(['checkout', '-q', baseBranch])
+    writeFileSync(join(dir, 'f.txt'), 'base version\n')
+    run(['commit', '-qam', 'base change'])
+
+    result = await internals.runAction(dir, 'merge', { name: 'conflict-side' })
+    expect('有冲突时合并失败（不假装成功）', result.ok === false, result.ok)
+    const during = await internals.buildStatus(dir)
+    expect('冲突期间 merging 为 true', during.merging === true, during.merging)
+    expect('冲突文件被标记为 conflicted', during.files.some((file) => file.kind === 'conflicted'), during.files.map((file) => [file.path, file.kind]))
+
+    const aborted = await internals.runAction(dir, 'merge-abort', {})
+    expect('放弃合并成功', aborted.ok === true, aborted.stderr)
+    const after = await internals.buildStatus(dir)
+    expect('放弃后 merging 回到 false', after.merging === false, after.merging)
+    expect('放弃后工作区干净', after.clean === true, after.files)
+
+    // (7) 非法输入
+    const emptyName = await internals.runAction(dir, 'merge', { name: '' })
+    expect('空分支名合并不执行', emptyName.ok === false, emptyName)
+    const emptyCreate = await internals.runAction(dir, 'create-branch', { name: '' })
+    expect('空分支名建分支不执行', emptyCreate.ok === false, emptyCreate)
+
+    rmSync(origin, { recursive: true, force: true })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

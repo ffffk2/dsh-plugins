@@ -203,11 +203,12 @@ async function upstreamState(root) {
 
 /** 组装一份完整的仓库状态。 */
 async function buildStatus(root) {
-  const [branchResult, statusResult, upstream, stashResult] = await Promise.all([
+  const [branchResult, statusResult, upstream, stashResult, gitDirResult] = await Promise.all([
     git(root, ['rev-parse', '--abbrev-ref', 'HEAD']),
     git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
     upstreamState(root),
     git(root, ['stash', 'list', '--format=%gd%x09%s']),
+    git(root, ['rev-parse', '--git-dir']),
   ])
 
   const branch = branchResult.ok ? branchResult.stdout.trim() : 'HEAD'
@@ -233,6 +234,18 @@ async function buildStatus(root) {
         })
     : []
 
+  // 进行中的合并靠 git 目录里的 MERGE_HEAD 判断，这是 git 自己的「合并未完成」标志。
+  // 面板据此显示「合并中 + 放弃合并」，否则用户遇到冲突后不知道自己在什么状态里。
+  let merging = false
+  if (gitDirResult.ok) {
+    const gitDir = isAbsolute(gitDirResult.stdout.trim()) ? gitDirResult.stdout.trim() : join(root, gitDirResult.stdout.trim())
+    try {
+      merging = statSync(join(gitDir, 'MERGE_HEAD')).isFile()
+    } catch {
+      merging = false
+    }
+  }
+
   return {
     root,
     branch,
@@ -242,6 +255,7 @@ async function buildStatus(root) {
     staged,
     unstaged,
     stashes,
+    merging,
     clean: files.length === 0,
   }
 }
@@ -428,7 +442,19 @@ async function runAction(root, action, payload) {
       return git(root, ['checkout', '--detach', name])
     case 'create-branch':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
-      return git(root, ['checkout', '-b', name])
+      // 从指定起点建分支。startPoint 可以是本地分支、远程分支（origin/x）或提交哈希。
+      // 不给就等价于「从当前 HEAD 建」，与原来行为一致。
+      // --no-track：从远程分支建本地分支时，git 默认会把上游设成它。
+      //   那是 `checkout -b` 的隐式行为，用户在下拉框里选「origin/main」通常只是想要
+      //   「以它为起点」，并不期待顺带绑定上游，所以这里显式关掉，避免意外。
+      return git(root, ['checkout', '-b', name, ...(typeof payload.startPoint === 'string' && payload.startPoint.trim() !== '' ? ['--no-track', payload.startPoint.trim()] : [])])
+    case 'merge':
+      if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
+      // 合并分两种：普通合并会新建合并提交；--ff-only 只在能快进时成功。
+      // 冲突时 git 会以非 0 退出并留下冲突标记，页面上按「有冲突」显示，工作区里自行解决。
+      return git(root, ['merge', ...(payload.ffOnly === true ? ['--ff-only'] : ['--no-ff']), ...(message.trim() === '' ? [] : ['-m', message]), name])
+    case 'merge-abort':
+      return git(root, ['merge', '--abort'])
     case 'delete-branch':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
       return git(root, ['branch', payload.force === true ? '-D' : '-d', name])

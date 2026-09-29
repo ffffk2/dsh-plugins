@@ -93,6 +93,16 @@ window.__ModuleLoader__.load({
       checkout: '切换',
       createBranch: '新建分支',
       newBranchPlaceholder: '新分支名',
+      startPoint: '起点分支',
+      startPointHead: '当前 HEAD',
+      merge: '合并到当前分支',
+      mergeFastForward: '允许快进',
+      mergeNoFf: '强制合并提交',
+      mergeConfirm: '把 {name} 合并到 {current}？',
+      mergeOk: '已合并',
+      mergeConflict: '合并有冲突，请在文件里解决后暂存并提交；也可以放弃合并。',
+      merging: '合并进行中',
+      mergeAbort: '放弃合并',
       create: '创建',
       cancel: '取消',
       delete: '删除',
@@ -177,6 +187,16 @@ window.__ModuleLoader__.load({
       checkout: 'Checkout',
       createBranch: 'New branch',
       newBranchPlaceholder: 'New branch name',
+      startPoint: 'Start point',
+      startPointHead: 'Current HEAD',
+      merge: 'Merge into current branch',
+      mergeFastForward: 'Allow fast-forward',
+      mergeNoFf: 'Always create a merge commit',
+      mergeConfirm: 'Merge {name} into {current}?',
+      mergeOk: 'Merged',
+      mergeConflict: 'The merge has conflicts. Resolve them in the files, then stage and commit; or abort the merge.',
+      merging: 'Merge in progress',
+      mergeAbort: 'Abort merge',
       create: 'Create',
       cancel: 'Cancel',
       delete: 'Delete',
@@ -657,7 +677,10 @@ window.__ModuleLoader__.load({
       const [logMore, setLogMore] = React.useState(false)
       const [logLoading, setLogLoading] = React.useState(false)
       const [branches, setBranches] = React.useState({ locals: [], remotes: [] })
+      /** 新建分支表单：null 表示收起，否则 {name, startPoint}。 */
       const [newBranch, setNewBranch] = React.useState(null)
+      /** 合并策略：默认允许快进（更常见的期望），可切换为强制生成合并提交。 */
+      const [mergeFastForward, setMergeFastForward] = React.useState(true)
 
       // 会话工作目录晚于首次渲染就绪时同步过来（新会话/切工作区都会变）。
       React.useEffect(() => {
@@ -947,10 +970,23 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'dshg-ok' }, t(notice))
             : null
 
+      // 合并进行中：冲突解决期间用户最需要知道「我现在处于合并状态」以及怎么退出去。
+      const mergeBanner =
+        status.merging === true
+          ? h(
+              'div',
+              { className: 'dshg-error', style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+              h('span', null, `${t('merging')} — ${t('mergeConflict')}`),
+              h('span', { className: 'dshg-spacer' }),
+              h('button', { className: 'dshg-btn', type: 'button', disabled: busy, onClick: () => void run('merge-abort', {}, null) }, t('mergeAbort')),
+            )
+          : null
+
       /** 变更页：提交框 + 两个分组 + 差异视图。 */
       const changesTab = h(
         React.Fragment,
         { key: 'changes' },
+        mergeBanner,
         h(
           'div',
           { className: 'dshg-commit-box' },
@@ -1130,7 +1166,18 @@ window.__ModuleLoader__.load({
                     ),
             )
 
-      /** 分支页：新建 + 本地/远程列表。 */
+      /**
+       * 分支页：新建（可选起点）+ 本地/远程列表（切换、合并、删除）。
+       *
+       * 「起点」下拉里同时列出本地与远程分支，外加当前 HEAD：
+       * 建分支最常用的两种意图就是「从当前继续」和「从某个远端分支拉一条本地线」，
+       * 让它们出现在同一个下拉框里，比先切分支再建少一步。
+       */
+      const sourceOptions = [
+        { value: '', label: `${t('startPointHead')} (${status.branch})` },
+        ...branches.locals.filter((branch) => branch.current !== true).map((branch) => ({ value: branch.name, label: branch.name })),
+        ...branches.remotes.map((branch) => ({ value: branch.name, label: branch.name })),
+      ]
       const branchesTab = h(
         React.Fragment,
         { key: 'branches' },
@@ -1138,46 +1185,83 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'dshg-inline-form' },
-              h('button', { className: 'dshg-btn', type: 'button', onClick: () => setNewBranch('') }, `+ ${t('createBranch')}`),
-            )
-          : h(
-              'div',
-              { className: 'dshg-inline-form' },
-              h('input', {
-                className: 'dshg-input',
-                type: 'text',
-                value: newBranch,
-                placeholder: t('newBranchPlaceholder'),
-                'aria-label': t('newBranchPlaceholder'),
-                autoFocus: true,
-                onChange: (event) => setNewBranch(event.target.value),
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter' && newBranch.trim() !== '') {
-                    void run('create-branch', { name: newBranch.trim() }, null).then(() => {
-                      setNewBranch(null)
-                      void loadBranches()
-                      setTab('changes')
-                    })
-                  }
-                  if (event.key === 'Escape') setNewBranch(null)
-                },
-              }),
+              h('button', { className: 'dshg-btn', type: 'button', onClick: () => setNewBranch({ name: '', startPoint: '' }) }, `+ ${t('createBranch')}`),
+              h('span', { className: 'dshg-spacer' }),
+              // 合并策略：默认允许快进。强制合并提交会多出一个 merge commit，
+              // 团队要求保留合并记录时才需要，所以做成显式开关而不是默认行为。
               h(
                 'button',
                 {
-                  className: 'dshg-btn',
+                  className: `dshg-btn${mergeFastForward ? ' is-on' : ''}`,
                   type: 'button',
-                  disabled: newBranch.trim() === '' || busy,
-                  onClick: () =>
-                    void run('create-branch', { name: newBranch.trim() }, null).then(() => {
-                      setNewBranch(null)
-                      void loadBranches()
-                      setTab('changes')
-                    }),
+                  title: mergeFastForward ? t('mergeFastForward') : t('mergeNoFf'),
+                  'aria-label': mergeFastForward ? t('mergeFastForward') : t('mergeNoFf'),
+                  onClick: () => setMergeFastForward((value) => !value),
                 },
-                t('create'),
+                mergeFastForward ? t('mergeFastForward') : t('mergeNoFf'),
               ),
-              h('button', { className: 'dshg-btn', type: 'button', onClick: () => setNewBranch(null) }, t('cancel')),
+            )
+          : h(
+              React.Fragment,
+              null,
+              h(
+                'div',
+                { className: 'dshg-inline-form' },
+                h('input', {
+                  className: 'dshg-input',
+                  type: 'text',
+                  value: newBranch.name,
+                  placeholder: t('newBranchPlaceholder'),
+                  'aria-label': t('newBranchPlaceholder'),
+                  autoFocus: true,
+                  onChange: (event) => setNewBranch({ ...newBranch, name: event.target.value }),
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter' && newBranch.name.trim() !== '') {
+                      void run('create-branch', { name: newBranch.name.trim(), startPoint: newBranch.startPoint }, null).then(() => {
+                        setNewBranch(null)
+                        void loadBranches()
+                        setTab('changes')
+                      })
+                    }
+                    if (event.key === 'Escape') setNewBranch(null)
+                  },
+                }),
+                h(
+                  'button',
+                  {
+                    className: 'dshg-btn',
+                    type: 'button',
+                    disabled: newBranch.name.trim() === '' || busy,
+                    onClick: () =>
+                      void run('create-branch', { name: newBranch.name.trim(), startPoint: newBranch.startPoint }, null).then(() => {
+                        setNewBranch(null)
+                        void loadBranches()
+                        setTab('changes')
+                      }),
+                  },
+                  t('create'),
+                ),
+                h('button', { className: 'dshg-btn', type: 'button', onClick: () => setNewBranch(null) }, t('cancel')),
+              ),
+              h(
+                'div',
+                { className: 'dshg-inline-form' },
+                h('span', { className: 'dshg-section-title' }, t('startPoint')),
+                h(
+                  'select',
+                  {
+                    className: 'dshg-input',
+                    value: newBranch.startPoint,
+                    'aria-label': t('startPoint'),
+                    onChange: (event) => setNewBranch({ ...newBranch, startPoint: event.target.value }),
+                  },
+                  // 远程分支可能很多，按 origin/ 之类的名字排一下，找起来更快。
+                  sourceOptions
+                    .slice()
+                    .sort((left, right) => (left.value === '' ? -1 : right.value === '' ? 1 : left.value.localeCompare(right.value)))
+                    .map((option) => h('option', { key: `src-${option.value}`, value: option.value }, option.label)),
+                ),
+              ),
             ),
         h('div', { className: 'dshg-section-head' }, h('span', { className: 'dshg-section-title' }, t('localBranches'))),
         branches.locals.length === 0
@@ -1196,6 +1280,20 @@ window.__ModuleLoader__.load({
                 h(
                   'span',
                   { className: 'dshg-branch-actions' },
+                  branch.current
+                    ? null
+                    : h(
+                        'button',
+                        {
+                          className: 'dshg-btn is-icon',
+                          type: 'button',
+                          disabled: busy,
+                          title: `${t('merge')} ${branch.name} → ${status.branch}`,
+                          'aria-label': `${t('merge')} ${branch.name}`,
+                          onClick: () => void run('merge', { name: branch.name, ffOnly: mergeFastForward }, null).then(() => setTab('changes')),
+                        },
+                        '⇥',
+                      ),
                   branch.current
                     ? null
                     : h('button', { className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('checkout'), 'aria-label': t('checkout'), onClick: () => void run('checkout', { name: branch.name }, null).then(() => setTab('changes')) }, '⑂'),
