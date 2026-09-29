@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git",
+    "description": "Visual Git operations in a right-sidebar tab: changes, staging, diff, commit, history, branches, and remotes."
+  }
+}
