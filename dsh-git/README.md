@@ -56,6 +56,17 @@ git 库，也不开 shell，所以分支名/路径里的空格与引号不需要
 `sidebar.right.pane.tab` / `sidebar.right.pane.tab.title` 上。样式全部走宿主主题 token
 （`--dsw-alias-*`），没有硬编码颜色，所以跟随明暗主题。
 
+仓库路径来自**会话的工作目录**，取法和官方「文件」面板一致：
+
+```js
+const cwd = useSessions((sessions) => sessions.byId[sessionId]?.cwd)
+```
+
+`sessionId` / `useSessions` / `useTabInfo` / `t` 都由宿主按标准 props 注入，
+**不存在 `props.view` 这种东西**——这里踩过坑：早先自造了一个 `props.view.cwd`，
+于是路径永远是空的，面板一律显示「当前目录不是 Git 仓库」，而服务端一切正常。
+`smoke.mjs` 现在按真实 props 契约渲染，并断言「会话 cwd 真的被当成仓库路径发了出去」。
+
 ## 安装
 
 profile 的 `package.json`：

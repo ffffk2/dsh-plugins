@@ -616,13 +616,28 @@ window.__ModuleLoader__.load({
      *
      * 一个组件装下全部状态：这是右侧栏 tab 的常规形态（浏览器 tab 也是单组件 + store），
      * 拆太细反而要把十几个回调层层传下去。
-     * @param props.view - 会话视图句柄：cwd 给仓库路径，setTitle 更新 tab 标题。
+     *
+     * 关于拿「仓库路径」：宿主对 tab 主体派发的是**标准 props + 槽位注入**，
+     * 并不存在 props.view 这种东西。会话工作目录必须按官方 files 面板同样的方式取——
+     * `useSessions((sessions) => sessions.byId[sessionId]?.cwd)`，其中 sessionId 由宿主注入。
+     * （早先误用 props.view.cwd，于是永远拿不到路径，面板一律显示「不是 Git 仓库」。）
+     * @param props.sessionId - 宿主注入的当前会话 id。
+     * @param props.useSessions - 宿主注入的会话快照选择器 hook。
+     * @param props.useTabInfo - 宿主注入的 tab 读取 hook（拿到 tab.id 与 actions）。
      */
     function GitPanel(props) {
-      const view = props.view ?? {}
+      const { sessionId, useSessions, useTabInfo, t: translate } = props
+      // 宿主把 t 作为标准 prop 注入（已带命名空间）。模块级的 t 是给渲染树深处那些
+      // 不接 props 的小组件与测试兜底用的，这里同步一次，保证两边查的是同一份字典。
+      if (typeof translate === 'function') t = translate
+      /** 会话工作目录，就是 git 仓库的候选路径。 */
+      const cwd = typeof useSessions === 'function' ? useSessions((sessions) => sessions?.byId?.[sessionId]?.cwd) : undefined
+      /** tab 句柄：用于把刷新绑到 tab 的刷新命令上。 */
+      const tabInfo = typeof useTabInfo === 'function' ? useTabInfo() : undefined
+
       /** 仓库路径：优先用会话工作目录，其次用用户手填并记住的值。 */
-      const [repoPath, setRepoPath] = React.useState(() => (typeof view.cwd === 'string' && view.cwd !== '' ? view.cwd : ''))
-      const [pathDraft, setPathDraft] = React.useState(() => (typeof view.cwd === 'string' && view.cwd !== '' ? view.cwd : ''))
+      const [repoPath, setRepoPath] = React.useState(() => (typeof cwd === 'string' && cwd !== '' ? cwd : ''))
+      const [pathDraft, setPathDraft] = React.useState(() => (typeof cwd === 'string' && cwd !== '' ? cwd : ''))
       const [status, setStatus] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [notice, setNotice] = React.useState(null)
@@ -646,11 +661,11 @@ window.__ModuleLoader__.load({
 
       // 会话工作目录晚于首次渲染就绪时同步过来（新会话/切工作区都会变）。
       React.useEffect(() => {
-        if (typeof view.cwd === 'string' && view.cwd !== '' && repoPath === '') {
-          setRepoPath(view.cwd)
-          setPathDraft(view.cwd)
+        if (typeof cwd === 'string' && cwd !== '' && repoPath === '') {
+          setRepoPath(cwd)
+          setPathDraft(cwd)
         }
-      }, [view.cwd])
+      }, [cwd])
 
       /** 刷新仓库状态。失败区分「不是仓库」与「真的报错」。 */
       const refresh = React.useCallback(
@@ -671,10 +686,6 @@ window.__ModuleLoader__.load({
               setStatus(payload)
               setError(null)
               setNotice(null)
-              if (typeof view.setTitle === 'function') {
-                const branch = payload.detached === true ? t('detached') : payload.branch
-                view.setTitle(`${t('tabTitle')} · ${branch}`)
-              }
             }
           } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause))
@@ -682,12 +693,20 @@ window.__ModuleLoader__.load({
             setBusy(false)
           }
         },
-        [repoPath, view],
+        [repoPath],
       )
 
       React.useEffect(() => {
         void refresh()
       }, [refresh])
+
+      // 把工具栏的「刷新」绑到 tab 自己的刷新命令上，和 files/浏览器面板一致。
+      const tabActions = tabInfo?.tab?.actions
+      const tabId = tabInfo?.tab?.id
+      React.useEffect(() => {
+        if (tabActions === undefined || typeof tabActions.bindCommands !== 'function') return undefined
+        return tabActions.bindCommands({ refresh: () => void refresh() })
+      }, [tabActions, tabId, refresh])
 
       const loadLog = React.useCallback(
         async (skip) => {
@@ -1244,10 +1263,18 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** tab 的标题：显示分支名，让多开时一眼能分辨。 */
+    /**
+     * tab 的标题。
+     *
+     * 不给 tab 注册标题槽位时，chip 显示的是注册表在打开那一刻记下的静态名字；
+     * 这里显式注册一个，让标题跟随语言切换。分支名不放在标题里——
+     * 标题是「这个 tab 是什么」，分支是面板里一眼能看到的状态，塞进来只会让 chip 过长。
+     * @param props.t - 宿主注入的翻译函数。
+     */
     function GitTitle(props) {
-      const view = props.view ?? {}
-      return h('span', { className: 'dshg-title' }, typeof view.title === 'string' && view.title !== '' ? view.title : t('tabTitle'))
+      const translate = props?.t
+      const label = typeof translate === 'function' ? translate('tabTitle') : t('tabTitle')
+      return h('span', { className: 'dshg-title' }, label)
     }
 
     /**

@@ -342,18 +342,29 @@ group('差异解析')
   expect('状态字母映射', statusLetter('untracked') === 'U' && statusLetter('deleted') === 'D' && statusLetter('renamed') === 'R')
 }
 
-// ---------- 用例 4：渲染（真实仓库数据形状） ----------
+// ---------- 用例 4：渲染（按宿主真实 props 契约） ----------
 group('面板渲染')
 {
   const { ctx, state } = makeContext()
   moduleFace.apply(ctx)
 
   const body = state.registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const title = state.registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab.title')
 
-  // (a) 无仓库路径时渲染「不是仓库」空状态——这条路径不需要 fetch。
+  /** 造一份宿主注入的 props：sessionId + useSessions + useTabInfo + t。 */
+  const hostProps = (cwd, overrides = {}) => ({
+    sessionId: 'sess-1',
+    // 宿主注入的是快照选择器 hook：selector 收到 sessions 快照。
+    useSessions: (selector) => selector({ byId: { 'sess-1': cwd === undefined ? {} : { cwd } } }),
+    useTabInfo: () => ({ tab: { id: 'tab-1', actions: { bindCommands: () => () => {} } } }),
+    t: (key) => key,
+    ...overrides,
+  })
+
+  // (a) 会话没有工作目录 → 渲染「不是仓库」空状态（不需要 fetch）。
   let empty = ''
   try {
-    empty = mount(body.component, { view: {} }).html
+    empty = mount(body.component, hostProps(undefined)).html
   } catch (error) {
     expect('空状态渲染不报错', false, error.message)
   }
@@ -361,8 +372,10 @@ group('面板渲染')
   expect('空状态提示不是仓库', empty.includes('notRepo'))
   expect('空状态给出路径输入框', empty.includes(`${PREFIX}input`))
 
-  // (b) 主视图：把 fetch 换成一个按路由返回固定数据的替身，让 status 真正落进 state。
-  //     这一步覆盖「文件行 / 提交框 / 远程按钮 / ahead-behind」这些只有拿到仓库才出现的 UI。
+  // (b) 会话有工作目录 → 必须拿它当仓库路径去查状态。
+  //     这是回归用例：曾经误用并不存在的 props.view.cwd，
+  //     于是路径永远是空的、面板一律显示「当前目录不是 Git 仓库」。
+  const requested = []
   const stubbed = {
     root: 'D:/demo',
     branch: 'main',
@@ -384,6 +397,7 @@ group('面板渲染')
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url) => {
     const text = String(url)
+    requested.push(text)
     let payload = {}
     if (text.includes('/git/status')) payload = stubbed
     else if (text.includes('/git/diff')) payload = { file: 'src/app.js', diff: '@@ -1 +1 @@\n-old\n+new', truncated: false, error: null }
@@ -392,12 +406,11 @@ group('面板渲染')
     return { ok: true, status: 200, json: async () => payload }
   }
 
-  // 挂载 → useEffect 里的 refresh() 是异步的，等微任务与定时器排空后重渲染。
   let html = ''
   try {
-    const instance = mount(body.component, { view: { cwd: 'D:/demo' } })
+    const instance = mount(body.component, hostProps('D:/demo'))
     await new Promise((resolve) => setTimeout(resolve, 40))
-    html = instance.rerender({ view: { cwd: 'D:/demo' } })
+    html = instance.rerender(hostProps('D:/demo'))
   } catch (error) {
     expect('主视图渲染不报错', false, error.message)
   } finally {
@@ -405,6 +418,8 @@ group('面板渲染')
   }
   if (DEBUG) console.log('  主视图 html 摘要：', html.slice(0, 500))
 
+  // 关键回归断言：会话 cwd 真的被当成仓库路径发出去了。
+  expect('用会话 cwd 去查了状态', requested.some((url) => url.includes('/git/status') && url.includes(encodeURIComponent('D:/demo'))), requested.slice(0, 3))
   expect('主视图渲染出分支按钮', html.includes(`${PREFIX}branch-btn`))
   expect('渲染出分支名 main', html.includes('>main<'))
   // t() 在测试里是恒等函数，所以渲染出的就是字典键本身。
@@ -418,6 +433,15 @@ group('面板渲染')
   expect('文件行渲染出状态字母 M', (html.match(/dshg-k-modified/g) ?? []).length >= 2)
   expect('未跟踪文件用 U 字母', html.includes('>U<'))
   expect('行内暂存/取消暂存按钮都在', html.includes(`${PREFIX}file-actions`))
+
+  // (c) 标题槽位：渲染出名字，且不依赖任何 props.view。
+  let titleHtml = ''
+  try {
+    titleHtml = mount(title.component, { t: (key) => key }).html
+  } catch (error) {
+    expect('标题渲染不报错', false, error.message)
+  }
+  expect('标题渲染出文案', titleHtml.includes('tabTitle'), titleHtml)
 }
 
 // ---------- 用例 5：无硬编码颜色 + 只用宿主 token ----------
