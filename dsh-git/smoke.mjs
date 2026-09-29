@@ -58,6 +58,13 @@ function flatten(list) {
   return out
 }
 
+/** 依赖数组的浅比较，和 React 的判定一致（含「没传 deps 视为每次都变」）。 */
+function sameDeps(previous, next) {
+  if (previous === undefined || !Array.isArray(previous) || !Array.isArray(next)) return false
+  if (previous.length !== next.length) return false
+  return previous.every((value, index) => Object.is(value, next[index]))
+}
+
 const React = {
   createElement(type, props, ...children) {
     return { type, props: props || {}, children: flatten(children) }
@@ -84,30 +91,32 @@ const React = {
     // 组件里「切到某个页签才去拉数据」这类 effect 全靠它，不实现的话
     // 那些分支在测试里永远走不到。
     const previous = slot[index]
-    const changed =
-      previous === undefined ||
-      !Array.isArray(deps) ||
-      !Array.isArray(previous.deps) ||
-      deps.length !== previous.deps.length ||
-      deps.some((value, position) => !Object.is(value, previous.deps[position]))
-    if (!changed) return
+    if (sameDeps(previous?.deps, deps)) return
     slot[index] = { deps, cleanup: undefined }
     // 副作用返回的清理函数先记下，下次重跑前调用。
     if (typeof previous?.cleanup === 'function') previous.cleanup()
     const result = fn()
     if (typeof result === 'function') slot[index].cleanup = result
   },
-  useMemo(fn) {
+  // useMemo / useCallback 必须按依赖数组决定要不要重算，跟真实 React 一致。
+  // 早先只算一次就永久缓存，于是「依赖变了但值没更新」——比如贮藏下拉框选中
+  // 某条之后，用 useMemo 派生的 selectedStash 永远停在 null，按钮一直是禁用的。
+  // 那种情况下测试会误报产品有问题，实际是替身不够真。
+  useMemo(fn, deps) {
     const index = hookIndex++
     const slot = hooks
-    if (slot.length <= index) slot[index] = fn()
-    return slot[index]
+    const previous = slot[index]
+    const changed = previous === undefined || !sameDeps(previous.deps, deps)
+    if (changed) slot[index] = { value: fn(), deps }
+    return slot[index].value
   },
-  useCallback(fn) {
+  useCallback(fn, deps) {
     const index = hookIndex++
     const slot = hooks
-    if (slot.length <= index) slot[index] = fn
-    return slot[index]
+    const previous = slot[index]
+    const changed = previous === undefined || !sameDeps(previous.deps, deps)
+    if (changed) slot[index] = { value: fn, deps }
+    return slot[index].value
   },
   useRef(value) {
     const index = hookIndex++
@@ -506,6 +515,73 @@ group('面板渲染')
     expect('确认后发出 discard-all 动作', posts.some((body) => body.action === 'discard-all'), posts)
   }
 
+  // (b4) 贮藏区：必须能**手动选**哪一条，且「应用」与「恢复」是两个不同的动作。
+  //   回归点：早先只有一个 ↑ 按钮，直接对 stashes[0] 发 stash-pop（默认弹最新一个并删除），
+  //   用户既选不了、也会在「只是想应用一下」时把贮藏弄丢。
+  const stashed = {
+    ...stubbed,
+    stashes: [
+      { ref: 'stash@{0}', message: 'On main: 第二条' },
+      { ref: 'stash@{1}', message: 'On main: 第一条' },
+    ],
+  }
+  const stashPosts = []
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    if (init !== undefined && init.method === 'POST') stashPosts.push(JSON.parse(String(init.body)))
+    let payload = {}
+    if (text.includes('/git/status')) payload = stashed
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: stashed }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  let stashHtml = ''
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    stashHtml = instance.rerender(hostProps('D:/demo'))
+
+    // 有贮藏时必须渲染出选择器，且两条都在里面。
+    expect('渲染出贮藏选择器', stashHtml.includes(`${PREFIX}stash-select`), stashHtml.slice(0, 300))
+    expect('选择器里有第一条贮藏', stashHtml.includes('stash@{0}') && stashHtml.includes('第二条'))
+    expect('选择器里有第二条贮藏', stashHtml.includes('stash@{1}') && stashHtml.includes('第一条'))
+    // 关键：默认值是占位项，不能预选最新那条。
+    expect('贮藏选择器默认不选中任何一条', stashHtml.includes('value=""'))
+    expect('渲染出应用（保留）按钮', stashHtml.includes('title="stashApply"') || stashHtml.includes('>stashApply<'))
+    expect('渲染出恢复并删除按钮', stashHtml.includes('>stashPop<'))
+    expect('不再有默认弹最新的裸 ↑ 按钮', stashHtml.includes('title="stashPop"') === false)
+
+    // 未选任何一条时，三个操作按钮都应是禁用的。
+    const stashButtonsBefore = handlers.filter((entry) => entry.event === 'onClick' && (entry.attrs.className ?? '').includes('dshg-btn'))
+    const enabledBefore = stashButtonsBefore.filter((entry) => entry.attrs.disabled !== true)
+    expect('未选贮藏时按钮禁用（提交框按钮除外）', stashButtonsBefore.length > enabledBefore.length)
+
+    // 手动选中 stash@{1}（不是最新的那条），然后点「应用」。
+    const select = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'stashPick')
+    expect('找得到贮藏选择器的 onChange', select !== undefined)
+    sandboxWindow.confirm = () => true
+    if (select !== undefined) {
+      select.handler({ target: { value: 'stash@{1}' } })
+      stashHtml = instance.rerender(hostProps('D:/demo'))
+      const applyButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.children) === 'stashApply')
+      expect('选完能拿到应用按钮', applyButton !== undefined)
+      expect('选中后应用按钮可用', applyButton?.attrs.disabled === false)
+      applyButton?.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    const applyPost = stashPosts.find((body) => body.action === 'stash-apply')
+    expect('应用发出的是 stash-apply（保留）而不是 stash-pop', applyPost !== undefined, stashPosts)
+    expect('应用带上的是手动选中的 stash@{1}', applyPost?.name === 'stash@{1}', applyPost)
+  } catch (error) {
+    expect('贮藏区渲染不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+    delete sandboxWindow.confirm
+  }
+
   // (c) 标题槽位：渲染出名字，且不依赖任何 props.view。
   let titleHtml = ''
   try {
@@ -861,6 +937,79 @@ group('丢弃与删除语义')
     expect('丢弃后回到上次提交的内容', text('a.txt') === 'one\n', text('a.txt'))
     const afterOrder = await internals.buildStatus(dir)
     expect('丢弃后索引也干净（无残留暂存）', afterOrder.clean === true, afterOrder.files)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------- 用例 7c：贮藏的应用 / 恢复 / 删除 ----------
+// 这一段钉住两件事：
+//   ① 应用贮藏**保留**该条（stash apply），恢复才删除（stash pop）—— 两者别搞混；
+//   ② 操作对象由调用方显式指定，不再隐式对 stash@{0} 动手。
+group('贮藏：应用保留、恢复删除、显式选条')
+{
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-git-stash-'))
+  const run = (args) => execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+  const text = (name) => readFileSync(join(dir, name), 'utf8').replace(/\r\n/g, '\n')
+  try {
+    run(['init'])
+    run(['config', 'user.email', 'smoke@example.com'])
+    run(['config', 'user.name', 'Smoke Test'])
+    run(['config', 'commit.gpgsign', 'false'])
+    writeFileSync(join(dir, 'a.txt'), 'base\n')
+    run(['add', '-A'])
+    run(['commit', '-m', 'base'])
+
+    // 造两条内容不同的贮藏：stash@{0} 是后存的（second），stash@{1} 是先存的（first）。
+    writeFileSync(join(dir, 'a.txt'), 'first\n')
+    const first = await internals.runAction(dir, 'stash-save', { message: '第一条' })
+    expect('贮藏第一条成功', first.ok === true, first.stderr)
+    writeFileSync(join(dir, 'a.txt'), 'second\n')
+    const second = await internals.runAction(dir, 'stash-save', { message: '第二条' })
+    expect('贮藏第二条成功', second.ok === true, second.stderr)
+
+    let status = await internals.buildStatus(dir)
+    expect('贮藏列表读到 2 条', status.stashes.length === 2, status.stashes)
+    expect('贮藏按新到旧排列', status.stashes[0].ref === 'stash@{0}' && status.stashes[1].ref === 'stash@{1}', status.stashes.map((item) => item.ref))
+    expect('贮藏说明文字被读到', status.stashes[0].message.includes('第二条'), status.stashes[0].message)
+
+    // --- 应用指定的那条（不是最新那条），并且要保留 ---
+    const applied = await internals.runAction(dir, 'stash-apply', { name: 'stash@{1}' })
+    expect('应用指定贮藏不报错', applied.ok === true, applied.stderr)
+    expect('应用的是选中的那条内容', text('a.txt') === 'first\n', text('a.txt'))
+    status = await internals.buildStatus(dir)
+    expect('应用后贮藏**不**被删除', status.stashes.length === 2, status.stashes.map((item) => item.ref))
+    expect('应用后工作区带上了改动', status.files.some((file) => file.path === 'a.txt'), status.files)
+
+    // 把工作区清干净，好验证下一条
+    await internals.runAction(dir, 'discard-all', {})
+
+    // --- 应用是幂等的可重复操作 ---
+    const reapplied = await internals.runAction(dir, 'stash-apply', { name: 'stash@{1}' })
+    expect('应用可重复执行', reapplied.ok === true, reapplied.stderr)
+    await internals.runAction(dir, 'discard-all', {})
+
+    // --- 恢复指定那条：删掉它，其余保留 ---
+    const popped = await internals.runAction(dir, 'stash-pop', { name: 'stash@{1}' })
+    expect('恢复指定贮藏不报错', popped.ok === true, popped.stderr)
+    expect('恢复的是选中的那条内容', text('a.txt') === 'first\n', text('a.txt'))
+    status = await internals.buildStatus(dir)
+    expect('恢复后只剩 1 条', status.stashes.length === 1, status.stashes.map((item) => item.ref))
+    expect('剩下的是没动的那条', status.stashes[0].message.includes('第二条'), status.stashes[0].message)
+
+    // --- 不带 ref 一律拒绝：避免隐式对最新一条动手 ---
+    const noRefApply = await internals.runAction(dir, 'stash-apply', {})
+    expect('应用不给 ref 被拒', noRefApply.ok === false, noRefApply)
+    const noRefPop = await internals.runAction(dir, 'stash-pop', {})
+    expect('恢复不给 ref 被拒', noRefPop.ok === false, noRefPop)
+    status = await internals.buildStatus(dir)
+    expect('被拒的操作没有动到贮藏', status.stashes.length === 1, status.stashes.map((item) => item.ref))
+
+    // --- 删除指定那条 ---
+    const dropped = await internals.runAction(dir, 'stash-drop', { name: 'stash@{0}' })
+    expect('删除指定贮藏成功', dropped.ok === true, dropped.stderr)
+    status = await internals.buildStatus(dir)
+    expect('删除后贮藏清空', status.stashes.length === 0, status.stashes)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

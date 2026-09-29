@@ -114,8 +114,16 @@ window.__ModuleLoader__.load({
       deleteBranchConfirm: '删除分支 {name}？',
       stash: '贮藏',
       stashSave: '贮藏更改',
-      stashPop: '恢复贮藏',
+      stashPop: '恢复贮藏并删除',
+      stashApply: '应用贮藏（保留）',
       stashDrop: '删除贮藏',
+      stashPick: '选择要操作的贮藏',
+      stashApplyConfirm: '应用 {ref}（{message}）？工作区会合并进它的内容，该贮藏仍保留。',
+      stashPopConfirm: '恢复 {ref}（{message}）并从贮藏列表里删除？',
+      stashDropConfirm: '删除贮藏 {ref}（{message}）？此操作不可撤销。',
+      stashApplyOk: '已应用贮藏',
+      stashPopOk: '已恢复贮藏',
+      stashNoMessage: '（无说明）',
       noCommits: '还没有任何提交。',
       loadMore: '加载更多',
       by: '作者',
@@ -213,8 +221,16 @@ window.__ModuleLoader__.load({
       deleteBranchConfirm: 'Delete branch {name}?',
       stash: 'Stashes',
       stashSave: 'Stash changes',
-      stashPop: 'Restore stash',
+      stashPop: 'Restore and drop',
+      stashApply: 'Apply stash (keep)',
       stashDrop: 'Drop stash',
+      stashPick: 'Choose a stash',
+      stashApplyConfirm: 'Apply {ref} ({message})? Its content is merged into the working tree and the stash is kept.',
+      stashPopConfirm: 'Restore {ref} ({message}) and remove it from the stash list?',
+      stashDropConfirm: 'Drop stash {ref} ({message})? This cannot be undone.',
+      stashApplyOk: 'Stash applied',
+      stashPopOk: 'Stash restored',
+      stashNoMessage: '(no message)',
       noCommits: 'No commits yet.',
       loadMore: 'Load more',
       by: 'by',
@@ -362,6 +378,12 @@ window.__ModuleLoader__.load({
 .dshg-tab:hover { color:var(--dsw-alias-label-primary); }
 .dshg-tab.is-on { color:var(--dsw-alias-brand-primary); border-bottom-color:var(--dsw-alias-brand-primary); }
 .dshg-sync { display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--dsw-alias-label-secondary); }
+/* 贮藏区：标题 + 下拉选择，下面是应用/恢复/删除按钮。 */
+.dshg-stash { margin-top:7px; padding-top:7px; border-top:1px solid var(--dsw-alias-border-l1); display:flex; flex-direction:column; gap:6px; }
+.dshg-stash-row { display:flex; align-items:center; gap:6px; }
+.dshg-stash-title { font-size:10.5px; color:var(--dsw-alias-label-secondary); flex:0 0 auto; }
+.dshg-stash-select { flex:1 1 auto; min-width:0; height:24px; font-size:11.5px; cursor:pointer; }
+.dshg-stash-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 `
 
     // ---- 纯函数工具 ----
@@ -697,6 +719,14 @@ window.__ModuleLoader__.load({
       const [newBranch, setNewBranch] = React.useState(null)
       /** 合并策略：默认允许快进（更常见的期望），可切换为强制生成合并提交。 */
       const [mergeFastForward, setMergeFastForward] = React.useState(true)
+      /**
+       * 当前选中的贮藏 ref（stash@{n}）。
+       *
+       * 有意不默认选最新那条：恢复/删除都是「改工作区」的操作，默认值会让人
+       * 点一下就动了 stash@{0}，而自己以为选的是别的。空串 = 还没选，此时所有
+       * 贮藏操作按钮都禁用，逼用户显式选一次。
+       */
+      const [stashRef, setStashRef] = React.useState('')
 
       // 会话工作目录晚于首次渲染就绪时同步过来（新会话/切工作区都会变）。
       React.useEffect(() => {
@@ -872,6 +902,35 @@ window.__ModuleLoader__.load({
         await run('discard-all', {}, 'discardAllOk')
       }, [run])
 
+      /** 取当前选中的贮藏条目；没选就返回 null（按钮此时也应该是禁用的）。 */
+      const selectedStash = React.useMemo(
+        () => (status?.stashes ?? []).find((item) => item.ref === stashRef) ?? null,
+        [status, stashRef],
+      )
+
+      /**
+       * 应用 / 恢复 / 删除选中的贮藏。
+       *
+       * 三种操作都可能改工作区或丢数据，都不做静默，一律先确认；
+       * 确认语里带上 ref 与说明文字，让人看清动的到底是哪一条。
+       * @param kind - 'apply'（保留）| 'pop'（恢复并删除）| 'drop'（删除）。
+       */
+      const runStash = React.useCallback(
+        async (kind) => {
+          const target = selectedStash
+          if (target === null) return
+          const key = kind === 'apply' ? 'stashApplyConfirm' : kind === 'pop' ? 'stashPopConfirm' : 'stashDropConfirm'
+          const values = { ref: target.ref, message: target.message === '' ? t('stashNoMessage') : target.message }
+          if (typeof window.confirm === 'function' && !window.confirm(fmt(key, values))) return
+          const action = kind === 'apply' ? 'stash-apply' : kind === 'pop' ? 'stash-pop' : 'stash-drop'
+          const okKey = kind === 'apply' ? 'stashApplyOk' : kind === 'pop' ? 'stashPopOk' : null
+          const result = await run(action, { name: target.ref }, okKey)
+          // 选中的那条没了（pop/drop）就清空选择，免得下拉框指着一个不存在的 ref。
+          if (result !== null && kind !== 'apply') setStashRef('')
+        },
+        [run, selectedStash],
+      )
+
       // ---- 空状态：还不是仓库 ----
       if (repoPath === '' || status === null) {
         const isNotRepo = notice === 'not-a-repo' || repoPath !== ''
@@ -1044,24 +1103,50 @@ window.__ModuleLoader__.load({
           status.stashes !== undefined && status.stashes.length > 0
             ? h(
                 'div',
-                { className: 'dshg-sync', style: { marginTop: '6px' } },
-                `${t('stash')}：${status.stashes.length}`,
+                { className: 'dshg-stash' },
                 h(
-                  'button',
-                  { className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('stashPop'), 'aria-label': t('stashPop'), onClick: () => void run('stash-pop', {}, null) },
-                  '↑',
+                  'div',
+                  { className: 'dshg-stash-row' },
+                  h('span', { className: 'dshg-stash-title' }, `${t('stash')}：${status.stashes.length}`),
+                  h(
+                    'select',
+                    {
+                      className: 'dshg-input dshg-stash-select',
+                      value: stashRef,
+                      'aria-label': t('stashPick'),
+                      onChange: (event) => setStashRef(event.target.value),
+                    },
+                    // 第一项是占位：不预选最新那条，逼用户显式选一次。
+                    h('option', { value: '' }, `— ${t('stashPick')} —`),
+                    status.stashes.map((item) =>
+                      h(
+                        'option',
+                        { key: item.ref, value: item.ref, title: item.message },
+                        `${item.ref}${item.message === '' ? '' : ` · ${item.message}`}`,
+                      ),
+                    ),
+                  ),
                 ),
                 h(
-                  'button',
-                  {
-                    className: 'dshg-btn is-icon',
-                    type: 'button',
-                    disabled: busy,
-                    title: t('stashDrop'),
-                    'aria-label': t('stashDrop'),
-                    onClick: () => void run('stash-drop', { name: status.stashes[0].ref }, null),
-                  },
-                  '✕',
+                  'div',
+                  { className: 'dshg-stash-actions' },
+                  // 应用（保留）排在前面并做主按钮：它不动贮藏列表，是更安全的默认选择。
+                  h(
+                    'button',
+                    { className: 'dshg-btn is-primary', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('apply') },
+                    t('stashApply'),
+                  ),
+                  h(
+                    'button',
+                    { className: 'dshg-btn', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('pop') },
+                    t('stashPop'),
+                  ),
+                  h('span', { className: 'dshg-spacer' }),
+                  h(
+                    'button',
+                    { className: 'dshg-btn is-icon is-danger', type: 'button', disabled: busy || selectedStash === null, title: t('stashDrop'), 'aria-label': t('stashDrop'), onClick: () => void runStash('drop') },
+                    '✕',
+                  ),
                 ),
               )
             : null,

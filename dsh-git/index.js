@@ -43,7 +43,7 @@ const ACTION_PATH = '/git/action'
  * 改了这个文件必须重启 DSH 才会生效（Node 缓存已导入的 ES 模块）。把它回报给页面，
  * 「页面看起来正常、跑的却是旧代码」就能当场看出来。**每次改这个文件都顺手加一。**
  */
-const HOST_BUILD = 2
+const HOST_BUILD = 3
 
 /** git 命令超时（毫秒）。fetch/push 会慢一些，单独放宽。 */
 const TIMEOUT_MS = 20_000
@@ -556,8 +556,15 @@ async function runAction(root, action, payload) {
       return git(root, ['push', '-u', 'origin', 'HEAD'], { timeout: NETWORK_TIMEOUT_MS })
     case 'stash-save':
       return git(root, ['stash', 'push', '--include-untracked', ...(message.trim() === '' ? [] : ['-m', message])])
+    // stash-apply：恢复后**保留**该条贮藏；stash-pop：恢复并从栈里删掉。
+    // 两者都必须显式给出 ref（默认的 stash@{0} 只是「最新一条」，而这个面板让用户选）
+    // ——不给就拒绝，避免「以为在恢复某条、实际动了最新那条」。
+    case 'stash-apply':
+      if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
+      return git(root, ['stash', 'apply', name])
     case 'stash-pop':
-      return git(root, ['stash', 'pop'])
+      if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
+      return git(root, ['stash', 'pop', name])
     case 'stash-drop':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
       return git(root, ['stash', 'drop', name])
