@@ -58,6 +58,11 @@ window.__ModuleLoader__.load({
       unstage: '取消暂存',
       discard: '放弃更改',
       discardConfirm: '放弃 {file} 的本地修改？此操作不可撤销。',
+      deleteUntracked: '删除文件',
+      deleteUntrackedConfirm: '删除未跟踪的文件 {file}？文件会从磁盘上移除，此操作不可撤销。',
+      discardAll: '全部丢弃',
+      discardAllConfirm: '放弃所有更改？已跟踪文件还原到上次提交，未跟踪文件将被删除（被 .gitignore 忽略的文件保留）。此操作不可撤销。',
+      discardAllOk: '已丢弃全部更改',
       stageAll: '全部暂存',
       unstageAll: '全部取消暂存',
       commitMessage: '消息（Ctrl+Enter 提交）',
@@ -109,8 +114,16 @@ window.__ModuleLoader__.load({
       deleteBranchConfirm: '删除分支 {name}？',
       stash: '贮藏',
       stashSave: '贮藏更改',
-      stashPop: '恢复贮藏',
+      stashPop: '恢复贮藏并删除',
+      stashApply: '应用贮藏（保留）',
       stashDrop: '删除贮藏',
+      stashPick: '选择要操作的贮藏',
+      stashApplyConfirm: '应用 {ref}（{message}）？工作区会合并进它的内容，该贮藏仍保留。',
+      stashPopConfirm: '恢复 {ref}（{message}）并从贮藏列表里删除？',
+      stashDropConfirm: '删除贮藏 {ref}（{message}）？此操作不可撤销。',
+      stashApplyOk: '已应用贮藏',
+      stashPopOk: '已恢复贮藏',
+      stashNoMessage: '（无说明）',
       noCommits: '还没有任何提交。',
       loadMore: '加载更多',
       by: '作者',
@@ -152,6 +165,11 @@ window.__ModuleLoader__.load({
       unstage: 'Unstage changes',
       discard: 'Discard changes',
       discardConfirm: 'Discard local changes to {file}? This cannot be undone.',
+      deleteUntracked: 'Delete file',
+      deleteUntrackedConfirm: 'Delete the untracked file {file}? It will be removed from disk. This cannot be undone.',
+      discardAll: 'Discard all',
+      discardAllConfirm: 'Discard all changes? Tracked files go back to the last commit and untracked files are deleted (files matching .gitignore are kept). This cannot be undone.',
+      discardAllOk: 'Discarded all changes',
       stageAll: 'Stage all',
       unstageAll: 'Unstage all',
       commitMessage: 'Message (Ctrl+Enter to commit)',
@@ -203,8 +221,16 @@ window.__ModuleLoader__.load({
       deleteBranchConfirm: 'Delete branch {name}?',
       stash: 'Stashes',
       stashSave: 'Stash changes',
-      stashPop: 'Restore stash',
+      stashPop: 'Restore and drop',
+      stashApply: 'Apply stash (keep)',
       stashDrop: 'Drop stash',
+      stashPick: 'Choose a stash',
+      stashApplyConfirm: 'Apply {ref} ({message})? Its content is merged into the working tree and the stash is kept.',
+      stashPopConfirm: 'Restore {ref} ({message}) and remove it from the stash list?',
+      stashDropConfirm: 'Drop stash {ref} ({message})? This cannot be undone.',
+      stashApplyOk: 'Stash applied',
+      stashPopOk: 'Stash restored',
+      stashNoMessage: '(no message)',
       noCommits: 'No commits yet.',
       loadMore: 'Load more',
       by: 'by',
@@ -261,6 +287,8 @@ window.__ModuleLoader__.load({
 .dshg-btn.is-on { color:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
 .dshg-btn.is-icon { width:24px; height:24px; padding:0; justify-content:center; font-size:13px; border-color:transparent; }
 .dshg-btn.is-icon:hover:not([disabled]) { background:var(--dsw-alias-bg-layer-2); }
+/* 删除/丢弃类动作：hover 时用错误色，和「暂存」「新建」这类安全动作区分开。 */
+.dshg-btn.is-danger:hover:not([disabled]) { color:var(--dsw-alias-state-error-primary); border-color:var(--dsw-alias-state-error-primary); }
 
 /* 计数器徽标 */
 .dshg-count { min-width:17px; height:17px; padding:0 5px; border-radius:9px; font-size:10px; line-height:17px; text-align:center; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
@@ -350,6 +378,12 @@ window.__ModuleLoader__.load({
 .dshg-tab:hover { color:var(--dsw-alias-label-primary); }
 .dshg-tab.is-on { color:var(--dsw-alias-brand-primary); border-bottom-color:var(--dsw-alias-brand-primary); }
 .dshg-sync { display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--dsw-alias-label-secondary); }
+/* 贮藏区：标题 + 下拉选择，下面是应用/恢复/删除按钮。 */
+.dshg-stash { margin-top:7px; padding-top:7px; border-top:1px solid var(--dsw-alias-border-l1); display:flex; flex-direction:column; gap:6px; }
+.dshg-stash-row { display:flex; align-items:center; gap:6px; }
+.dshg-stash-title { font-size:10.5px; color:var(--dsw-alias-label-secondary); flex:0 0 auto; }
+.dshg-stash-select { flex:1 1 auto; min-width:0; height:24px; font-size:11.5px; cursor:pointer; }
+.dshg-stash-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 `
 
     // ---- 纯函数工具 ----
@@ -562,6 +596,10 @@ window.__ModuleLoader__.load({
     /** 一行文件：名字 + 状态字母 + hover 动作。 */
     function FileRow({ file, staged, active, onOpen, onStage, onUnstage, onDiscard }) {
       const { dir, name } = splitPath(file.path)
+      // 未跟踪文件的「丢弃」其实是删除：git 里没有它的任何备份，host 侧会走 clean -f。
+      // 图标与文案都跟着改，否则用户以为只是还原，实际文件没了。
+      const removes = file.kind === 'untracked'
+      const actionLabel = removes ? t('deleteUntracked') : t('discard')
       return h(
         'div',
         {
@@ -584,7 +622,7 @@ window.__ModuleLoader__.load({
           staged
             ? h('button', { className: 'dshg-btn is-icon', type: 'button', title: t('unstage'), 'aria-label': t('unstage'), onClick: () => onUnstage(file) }, '−')
             : h('button', { className: 'dshg-btn is-icon', type: 'button', title: t('stage'), 'aria-label': t('stage'), onClick: () => onStage(file) }, '+'),
-          h('button', { className: 'dshg-btn is-icon', type: 'button', title: t('discard'), 'aria-label': t('discard'), onClick: () => onDiscard(file) }, '↺'),
+          h('button', { className: 'dshg-btn is-icon', type: 'button', title: actionLabel, 'aria-label': actionLabel, onClick: () => onDiscard(file) }, removes ? '✕' : '↺'),
         ),
       )
     }
@@ -681,6 +719,88 @@ window.__ModuleLoader__.load({
       const [newBranch, setNewBranch] = React.useState(null)
       /** 合并策略：默认允许快进（更常见的期望），可切换为强制生成合并提交。 */
       const [mergeFastForward, setMergeFastForward] = React.useState(true)
+      /**
+       * 当前选中的贮藏 ref（stash@{n}）。
+       *
+       * 有意不默认选最新那条：恢复/删除都是「改工作区」的操作，默认值会让人
+       * 点一下就动了 stash@{0}，而自己以为选的是别的。空串 = 还没选，此时所有
+       * 贮藏操作按钮都禁用，逼用户显式选一次。
+       */
+      const [stashRef, setStashRef] = React.useState('')
+      /**
+       * 面板常驻容器。用于在「即将卸载当前焦点元素」时把焦点收回来，
+       * 详见 releaseFocus() 的说明——不这么做会让整个应用的键盘输入失效。
+       */
+      const rootRef = React.useRef(null)
+
+      /*
+       * 焦点兜底。
+       *
+       * 这是本插件最容易造成全局故障的一处，机制如下：
+       *   ① 写操作走 run()，它把 busy 置 true，于是面板内 21 个按钮同时被 disabled；
+       *      浏览器会立刻 blur 掉那个「刚变成 disabled」、正持有焦点的按钮，焦点落到 body。
+       *   ② 宿主的焦点保持逻辑（dsh-client-ui-sidebar-right 的 observeSidebarFocus）本可救场，
+       *      但它只在两个条件下动作：元素被**移除**（MutationObserver 只看 childList），
+       *      或 focusout 时焦点已交给别处（relatedTarget !== null）。
+       *      而 disabled 只是改属性、元素并没有被移除，且 focusout 的 relatedTarget 是 null，
+       *      于是宿主走了 `if (event.relatedTarget === null && focused?.element.isConnected)`
+       *      这条分支——直接清空自己记录的焦点并断开观察。
+       *      从此它没有任何可恢复的目标，焦点永久停在 body 上。
+       *   ③ 用户表现就是「操作完打字进不了输入框，点别处也恢复不了」。
+       *
+       * releaseFocus 负责「动之前先挪走」，restoreFocus 负责「动完了再还回来」。
+       * 两者都只在焦点确实属于面板时才插手，用户主动点到别处绝不干预。
+       */
+
+      /** 记下动作开始前焦点是否在面板内，用于事后判断要不要还焦点。 */
+      const captureFocus = React.useCallback(() => {
+        if (typeof document === 'undefined') return false
+        const root = rootRef.current
+        const active = document.activeElement
+        if (root === null || active === null || active === document.body) return false
+        return root.contains(active)
+      }, [])
+
+      /**
+       * 把焦点还给面板常驻容器。
+       *
+       * 只在焦点**已经落空**（body / 无）时才动手：用户若已把焦点放到别处
+       * （比如点了会话输入框），这里必须什么都不做，绝不抢。
+       */
+      const restoreFocus = React.useCallback(() => {
+        if (typeof document === 'undefined') return
+        // 等 React 提交完 DOM 再读 activeElement，否则读到的还是旧值。
+        queueMicrotask(() => {
+          if (typeof document === 'undefined') return
+          const now = document.activeElement
+          if (now !== null && now !== document.body) return
+          const target = rootRef.current
+          if (target === null || !target.isConnected) return
+          // tabindex=-1：可编程聚焦，又不进 Tab 序列，不干扰键盘导航。
+          if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
+          target.focus({ preventScroll: true })
+        })
+      }, [])
+
+      /**
+       * 在「即将卸载当前焦点元素」的状态更新之前，把焦点主动交还给面板根节点。
+       *
+       * 与 run() 里的 capture/restore 互补：那条覆盖「按钮被 disabled」，
+       * 这条覆盖「表单/下拉框整个被卸载」——卸载后再还焦点已经晚了，
+       * 焦点会掉进面板这个 tabindex=-1 的容器里，宿主的恢复判断同样不成立。
+       * @param nodeRef - 指向面板常驻容器的 ref。
+       */
+      function releaseFocus(nodeRef) {
+        if (typeof document === 'undefined') return
+        const active = document.activeElement
+        const root = nodeRef?.current ?? null
+        if (active === null || active === document.body) return
+        if (root !== null && !root.contains(active)) return
+        const target = root ?? document.body
+        if (target === document.body) return
+        if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
+        target.focus({ preventScroll: true })
+      }
 
       // 会话工作目录晚于首次渲染就绪时同步过来（新会话/切工作区都会变）。
       React.useEffect(() => {
@@ -695,6 +815,8 @@ window.__ModuleLoader__.load({
         async (target) => {
           const path = target ?? repoPath
           if (path === '') return
+          // 与 run() 同理：刷新按钮也会因为 busy 被 disabled，焦点必须先收回来。
+          const hadFocus = captureFocus()
           setBusy(true)
           try {
             const payload = await api.status(path)
@@ -714,9 +836,10 @@ window.__ModuleLoader__.load({
             setError(cause instanceof Error ? cause.message : String(cause))
           } finally {
             setBusy(false)
+            if (hadFocus) restoreFocus()
           }
         },
-        [repoPath],
+        [repoPath, captureFocus, restoreFocus],
       )
 
       React.useEffect(() => {
@@ -778,6 +901,9 @@ window.__ModuleLoader__.load({
       /** 统一的写操作入口：跑完顺手刷新状态。 */
       const run = React.useCallback(
         async (action, payload, successKey) => {
+          // 必须在 setBusy(true) **之前**判断：一旦 busy 生效，正持有焦点的按钮
+          // 立刻被 disabled，浏览器随即 blur 它，此刻再读 activeElement 已经晚了。
+          const hadFocus = captureFocus()
           setBusy(true)
           setError(null)
           try {
@@ -802,9 +928,11 @@ window.__ModuleLoader__.load({
             return null
           } finally {
             setBusy(false)
+            // 只有「动之前在面板里、动完焦点丢了」才还焦点；用户自己点到别处就不碰。
+            if (hadFocus) restoreFocus()
           }
         },
-        [repoPath, loadBranches],
+        [repoPath, loadBranches, captureFocus, restoreFocus],
       )
 
       const openDiff = React.useCallback(
@@ -842,10 +970,85 @@ window.__ModuleLoader__.load({
 
       const discard = React.useCallback(
         async (file) => {
-          if (typeof window.confirm === 'function' && !window.confirm(fmt('discardConfirm', { file: file.path }))) return
+          // 未跟踪文件的确认语必须说「删除」：那条路径确实是把文件从磁盘上抹掉，
+          // 沿用「放弃修改」会让用户以为是可逆的还原。
+          const key = file.kind === 'untracked' ? 'deleteUntrackedConfirm' : 'discardConfirm'
+          if (typeof window.confirm === 'function' && !window.confirm(fmt(key, { file: file.path }))) return
           await run('discard', { files: [file.path] })
         },
         [run],
+      )
+
+      const discardAll = React.useCallback(async () => {
+        if (typeof window.confirm === 'function' && !window.confirm(t('discardAllConfirm'))) return
+        await run('discard-all', {}, 'discardAllOk')
+      }, [run])
+
+      /** 取当前选中的贮藏条目；没选就返回 null（按钮此时也应该是禁用的）。 */
+      const selectedStash = React.useMemo(
+        () => (status?.stashes ?? []).find((item) => item.ref === stashRef) ?? null,
+        [status, stashRef],
+      )
+
+      /**
+       * 贮藏当前更改。
+       *
+       * 「贮藏更改」按钮只在 `unstaged.length > 0` 时渲染 —— 贮藏成功后工作区变干净，
+       * 这个按钮连同它的焦点会一起被卸载。所以要先 releaseFocus，
+       * 再把焦点交出去，否则焦点掉进面板容器，整个应用都打不了字。
+       */
+      const stashSave = React.useCallback(async () => {
+        releaseFocus(rootRef)
+        await run('stash-save', {}, null)
+      }, [run])
+
+      /**
+       * 应用 / 恢复 / 删除选中的贮藏。
+       *
+       * 三种操作都可能改工作区或丢数据，都不做静默，一律先确认；
+       * 确认语里带上 ref 与说明文字，让人看清动的到底是哪一条。
+       * @param kind - 'apply'（保留）| 'pop'（恢复并删除）| 'drop'（删除）。
+       */
+      const runStash = React.useCallback(
+        async (kind) => {
+          const target = selectedStash
+          if (target === null) return
+          const key = kind === 'apply' ? 'stashApplyConfirm' : kind === 'pop' ? 'stashPopConfirm' : 'stashDropConfirm'
+          const values = { ref: target.ref, message: target.message === '' ? t('stashNoMessage') : target.message }
+          if (typeof window.confirm === 'function' && !window.confirm(fmt(key, values))) return
+          const action = kind === 'apply' ? 'stash-apply' : kind === 'pop' ? 'stash-pop' : 'stash-drop'
+          const okKey = kind === 'apply' ? 'stashApplyOk' : kind === 'pop' ? 'stashPopOk' : null
+          const result = await run(action, { name: target.ref }, okKey)
+          // 选中的那条没了（pop/drop）就清空选择，免得下拉框指着一个不存在的 ref。
+          // 这一步会把下拉框的值重置，等于让「当前有焦点的元素」发生变更，
+          // 所以先把焦点从面板内部挪到常驻容器上，别让它落进看不见的地方。
+          if (result !== null && kind !== 'apply') {
+            releaseFocus(rootRef)
+            setStashRef('')
+          }
+        },
+        [run, selectedStash],
+      )
+
+      /**
+       * 新建分支：成功后收起表单并切回「更改」页。
+       *
+       * 收起表单 = 卸载那个 autoFocus 的输入框（或承载焦点的「创建」按钮），
+       * 所以必须先 releaseFocus，否则焦点会掉进面板容器里，整个应用都打不了字。
+       * @param name - 新分支名。
+       * @param startPoint - 起点分支；空串表示当前 HEAD。
+       */
+      const createBranch = React.useCallback(
+        async (name, startPoint) => {
+          if (name === '') return
+          releaseFocus(rootRef)
+          const result = await run('create-branch', { name, startPoint }, null)
+          if (result === null) return
+          setNewBranch(null)
+          void loadBranches()
+          setTab('changes')
+        },
+        [run, loadBranches],
       )
 
       // ---- 空状态：还不是仓库 ----
@@ -1014,30 +1217,56 @@ window.__ModuleLoader__.load({
             h('button', { className: 'dshg-btn', type: 'button', disabled: busy || message.trim() === '', onClick: () => void run('commit-amend', { message }) }, t('commitAmend')),
             h('span', { className: 'dshg-spacer' }),
             unstaged.length > 0
-              ? h('button', { className: 'dshg-btn', type: 'button', disabled: busy, onClick: () => void run('stash-save', {}, null) }, t('stashSave'))
+              ? h('button', { className: 'dshg-btn', type: 'button', disabled: busy, onClick: () => void stashSave() }, t('stashSave'))
               : null,
           ),
           status.stashes !== undefined && status.stashes.length > 0
             ? h(
                 'div',
-                { className: 'dshg-sync', style: { marginTop: '6px' } },
-                `${t('stash')}：${status.stashes.length}`,
+                { className: 'dshg-stash' },
                 h(
-                  'button',
-                  { className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('stashPop'), 'aria-label': t('stashPop'), onClick: () => void run('stash-pop', {}, null) },
-                  '↑',
+                  'div',
+                  { className: 'dshg-stash-row' },
+                  h('span', { className: 'dshg-stash-title' }, `${t('stash')}：${status.stashes.length}`),
+                  h(
+                    'select',
+                    {
+                      className: 'dshg-input dshg-stash-select',
+                      value: stashRef,
+                      'aria-label': t('stashPick'),
+                      onChange: (event) => setStashRef(event.target.value),
+                    },
+                    // 第一项是占位：不预选最新那条，逼用户显式选一次。
+                    h('option', { value: '' }, `— ${t('stashPick')} —`),
+                    status.stashes.map((item) =>
+                      h(
+                        'option',
+                        { key: item.ref, value: item.ref, title: item.message },
+                        `${item.ref}${item.message === '' ? '' : ` · ${item.message}`}`,
+                      ),
+                    ),
+                  ),
                 ),
                 h(
-                  'button',
-                  {
-                    className: 'dshg-btn is-icon',
-                    type: 'button',
-                    disabled: busy,
-                    title: t('stashDrop'),
-                    'aria-label': t('stashDrop'),
-                    onClick: () => void run('stash-drop', { name: status.stashes[0].ref }, null),
-                  },
-                  '✕',
+                  'div',
+                  { className: 'dshg-stash-actions' },
+                  // 应用（保留）排在前面并做主按钮：它不动贮藏列表，是更安全的默认选择。
+                  h(
+                    'button',
+                    { className: 'dshg-btn is-primary', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('apply') },
+                    t('stashApply'),
+                  ),
+                  h(
+                    'button',
+                    { className: 'dshg-btn', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('pop') },
+                    t('stashPop'),
+                  ),
+                  h('span', { className: 'dshg-spacer' }),
+                  h(
+                    'button',
+                    { className: 'dshg-btn is-icon is-danger', type: 'button', disabled: busy || selectedStash === null, title: t('stashDrop'), 'aria-label': t('stashDrop'), onClick: () => void runStash('drop') },
+                    '✕',
+                  ),
                 ),
               )
             : null,
@@ -1082,7 +1311,10 @@ window.__ModuleLoader__.load({
                   onToggle: () => setChangesOpen((value) => !value),
                   actions:
                     unstaged.length > 0
-                      ? h('button', { className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('stageAll'), 'aria-label': t('stageAll'), onClick: () => void run('stage-all', {}, null) }, '+')
+                      ? [
+                          h('button', { key: 'discard-all', className: 'dshg-btn is-icon is-danger', type: 'button', disabled: busy, title: t('discardAll'), 'aria-label': t('discardAll'), onClick: () => void discardAll() }, '⌫'),
+                          h('button', { key: 'stage-all', className: 'dshg-btn is-icon', type: 'button', disabled: busy, title: t('stageAll'), 'aria-label': t('stageAll'), onClick: () => void run('stage-all', {}, null) }, '+'),
+                        ]
                       : null,
                 },
                 unstaged.map((file) =>
@@ -1217,13 +1449,12 @@ window.__ModuleLoader__.load({
                   onChange: (event) => setNewBranch({ ...newBranch, name: event.target.value }),
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' && newBranch.name.trim() !== '') {
-                      void run('create-branch', { name: newBranch.name.trim(), startPoint: newBranch.startPoint }, null).then(() => {
-                        setNewBranch(null)
-                        void loadBranches()
-                        setTab('changes')
-                      })
+                      void createBranch(newBranch.name.trim(), newBranch.startPoint)
                     }
-                    if (event.key === 'Escape') setNewBranch(null)
+                    if (event.key === 'Escape') {
+                      releaseFocus(rootRef)
+                      setNewBranch(null)
+                    }
                   },
                 }),
                 h(
@@ -1232,16 +1463,23 @@ window.__ModuleLoader__.load({
                     className: 'dshg-btn',
                     type: 'button',
                     disabled: newBranch.name.trim() === '' || busy,
-                    onClick: () =>
-                      void run('create-branch', { name: newBranch.name.trim(), startPoint: newBranch.startPoint }, null).then(() => {
-                        setNewBranch(null)
-                        void loadBranches()
-                        setTab('changes')
-                      }),
+                    onClick: () => void createBranch(newBranch.name.trim(), newBranch.startPoint),
                   },
                   t('create'),
                 ),
-                h('button', { className: 'dshg-btn', type: 'button', onClick: () => setNewBranch(null) }, t('cancel')),
+                h(
+                  'button',
+                  {
+                    className: 'dshg-btn',
+                    type: 'button',
+                    onClick: () => {
+                      // 取消同样会卸载输入框，焦点先还回去。
+                      releaseFocus(rootRef)
+                      setNewBranch(null)
+                    },
+                  },
+                  t('cancel'),
+                ),
               ),
               h(
                 'div',
@@ -1352,7 +1590,7 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'dshg-root' },
+        { className: 'dshg-root', ref: rootRef },
         h('style', { key: 'style' }, CSS),
         topBar,
         tabsBar,

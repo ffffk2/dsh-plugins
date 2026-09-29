@@ -12,7 +12,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
@@ -58,6 +58,13 @@ function flatten(list) {
   return out
 }
 
+/** 依赖数组的浅比较，和 React 的判定一致（含「没传 deps 视为每次都变」）。 */
+function sameDeps(previous, next) {
+  if (previous === undefined || !Array.isArray(previous) || !Array.isArray(next)) return false
+  if (previous.length !== next.length) return false
+  return previous.every((value, index) => Object.is(value, next[index]))
+}
+
 const React = {
   createElement(type, props, ...children) {
     return { type, props: props || {}, children: flatten(children) }
@@ -84,30 +91,32 @@ const React = {
     // 组件里「切到某个页签才去拉数据」这类 effect 全靠它，不实现的话
     // 那些分支在测试里永远走不到。
     const previous = slot[index]
-    const changed =
-      previous === undefined ||
-      !Array.isArray(deps) ||
-      !Array.isArray(previous.deps) ||
-      deps.length !== previous.deps.length ||
-      deps.some((value, position) => !Object.is(value, previous.deps[position]))
-    if (!changed) return
+    if (sameDeps(previous?.deps, deps)) return
     slot[index] = { deps, cleanup: undefined }
     // 副作用返回的清理函数先记下，下次重跑前调用。
     if (typeof previous?.cleanup === 'function') previous.cleanup()
     const result = fn()
     if (typeof result === 'function') slot[index].cleanup = result
   },
-  useMemo(fn) {
+  // useMemo / useCallback 必须按依赖数组决定要不要重算，跟真实 React 一致。
+  // 早先只算一次就永久缓存，于是「依赖变了但值没更新」——比如贮藏下拉框选中
+  // 某条之后，用 useMemo 派生的 selectedStash 永远停在 null，按钮一直是禁用的。
+  // 那种情况下测试会误报产品有问题，实际是替身不够真。
+  useMemo(fn, deps) {
     const index = hookIndex++
     const slot = hooks
-    if (slot.length <= index) slot[index] = fn()
-    return slot[index]
+    const previous = slot[index]
+    const changed = previous === undefined || !sameDeps(previous.deps, deps)
+    if (changed) slot[index] = { value: fn(), deps }
+    return slot[index].value
   },
-  useCallback(fn) {
+  useCallback(fn, deps) {
     const index = hookIndex++
     const slot = hooks
-    if (slot.length <= index) slot[index] = fn
-    return slot[index]
+    const previous = slot[index]
+    const changed = previous === undefined || !sameDeps(previous.deps, deps)
+    if (changed) slot[index] = { value: fn, deps }
+    return slot[index].value
   },
   useRef(value) {
     const index = hookIndex++
@@ -128,6 +137,16 @@ function textOf(node) {
   if (Array.isArray(node)) return node.map(textOf).join('')
   if (typeof node === 'object') return textOf(node.children)
   return ''
+}
+
+/** 当前渲染所属的极简 DOM（由 loadPlugin 建好），以及本次渲染的 DOM 挂载点。 */
+let currentDom = null
+let domParent = null
+
+/** 递归把一棵子树标记成「已从文档移除」，模拟 React 卸载。 */
+function markDisconnected(element) {
+  element.isConnected = false
+  for (const child of element.children ?? []) markDisconnected(child)
 }
 
 function render(node) {
@@ -156,9 +175,13 @@ function render(node) {
     if (type === activeRoot) rootHooks = produced
     return render(out)
   }
+  // 宿主元素：同时在极简 DOM 里建一份，供焦点逻辑使用。
+  const parent = domParent
+  const element = currentDom === null ? null : currentDom.createElement(String(type), parent)
+  if (element !== null && typeof props.ref === 'object' && props.ref !== null) props.ref.current = element
   const attrs = []
   for (const [name, value] of Object.entries(props)) {
-    if (name === 'children' || value === undefined || value === null) continue
+    if (name === 'children' || name === 'ref' || value === undefined || value === null) continue
     if (name.startsWith('on') && typeof value === 'function') {
       handlers.push({ tag: type, attrs: { ...props, children }, event: name, handler: value })
       continue
@@ -172,8 +195,13 @@ function render(node) {
     if (value === true) { attrs.push(name); continue }
     attrs.push(`${name}="${escapeHtml(value)}"`)
   }
+  const savedParent = domParent
+  domParent = element ?? parent
   const body = render(children)
-  return `<${type}${attrs.length ? ' ' + attrs.join(' ') : ''}>${body}</${type}>`
+  domParent = savedParent
+  if (element === null) return `<${type}${attrs.length ? ' ' + attrs.join(' ') : ''}>${body}</${type}>`
+  element.html = `<${type}${attrs.length ? ' ' + attrs.join(' ') : ''}>${body}</${type}>`
+  return element.html
 }
 
 /** 当前作为「实例」被反复重渲染的顶层组件；它的 hook 状态跨渲染保留。 */
@@ -193,6 +221,15 @@ function mount(component, props) {
     handlers = []
     hooks = rootHooks
     hookIndex = 0
+    // 每轮渲染重建 DOM 树：模拟 React 卸载旧子树、挂载新子树。
+    // 焦点兜底逻辑要知道「原来的焦点元素还在不在」，所以这棵树必须是真的：
+    // 旧节点标记为断开并从 body 移除，否则 children 会越堆越多，
+    // rootRef.current 也会指到一个早就过期的节点上。
+    if (currentDom !== null) {
+      for (const child of currentDom.body.children) markDisconnected(child)
+      currentDom.body.children.length = 0
+    }
+    domParent = currentDom?.body ?? null
     const html = render(React.createElement(component, nextProps ?? props))
     rootHooks = hooks
     return html
@@ -202,6 +239,78 @@ function mount(component, props) {
 }
 
 // ---------- 装载 client.js ----------
+
+/**
+ * 极简 DOM：只实现插件焦点兜底逻辑用到的那几个 API。
+ *
+ * 为什么非要有它：client.js 的焦点逻辑全部写在 `typeof document === 'undefined'`
+ * 的守卫后面。不给 document，那些分支在测试里永远走不到 —— 焦点一旦丢失就会
+ * 卡死整个应用的键盘输入，这种 bug 不能靠「代码看起来对」来保证。
+ *
+ * 只实现被真正用到的部分，不做通用 DOM：
+ *   document.activeElement / document.body、元素上的
+ *   focus() / contains() / hasAttribute() / setAttribute() / isConnected。
+ * 语义按浏览器来：focus() 会改 activeElement；contains() 沿 parent 链向上找。
+ */
+function makeDom() {
+  const body = {
+    tag: 'body',
+    parent: null,
+    attrs: new Set(),
+    isConnected: true,
+    children: [],
+  }
+  body.contains = (node) => {
+    for (let cursor = node; cursor !== null && cursor !== undefined; cursor = cursor.parent) {
+      if (cursor === body) return true
+    }
+    return false
+  }
+  const document = {
+    activeElement: body,
+    body,
+    /** 记录每次 .focus()，断言「焦点被还回去了」时直接看它。 */
+    focusLog: [],
+    querySelectorAll: () => [],
+  }
+  body.focus = function focus() {
+    document.activeElement = body
+    document.focusLog.push('body')
+  }
+  /**
+   * 造一个可作为面板容器的元素。
+   * @param tag - 标签名，仅用于调试可读性。
+   * @param parent - 父元素，默认挂在 body 下。
+   */
+  function createElement(tag, parent = body) {
+    const element = {
+      tag,
+      parent,
+      attrs: new Set(),
+      isConnected: true,
+      children: [],
+    }
+    element.contains = (node) => {
+      for (let cursor = node; cursor !== null && cursor !== undefined; cursor = cursor.parent) {
+        if (cursor === element) return true
+      }
+      return false
+    }
+    element.hasAttribute = (name) => element.attrs.has(name)
+    element.setAttribute = (name, value) => {
+      element.attrs.add(name)
+      element.attrValues = { ...(element.attrValues ?? {}), [name]: value }
+    }
+    element.focus = () => {
+      document.activeElement = element
+      document.focusLog.push(tag)
+    }
+    if (parent !== null) parent.children.push(element)
+    return element
+  }
+  return { document, body, createElement }
+}
+
 function loadPlugin() {
   let captured = null
   const sandboxWindow = {
@@ -212,8 +321,11 @@ function loadPlugin() {
   // ReferenceError，而被组件的 try/catch 吞成一句错误提示——极难排查。
   // fetch 走一层转发，这样测试里替换 globalThis.fetch 立刻生效。
   const sandboxFetch = (...args) => globalThis.fetch(...args)
+  const dom = makeDom()
   const context = vm.createContext({
     window: sandboxWindow,
+    document: dom.document,
+    queueMicrotask,
     console,
     React,
     fetch: sandboxFetch,
@@ -225,13 +337,14 @@ function loadPlugin() {
     TextDecoder,
   })
   context.globalThis = context
+  currentDom = dom
   vm.runInContext(fs.readFileSync(CLIENT, 'utf8'), context, { filename: 'client.js' })
   if (captured === null) throw new Error('client.js 没有调用 window.__ModuleLoader__.load')
   const moduleFace = captured.factory((name) => {
     if (name === 'react') return React
     throw new Error(`未预期的 require("${name}")`)
   })
-  return { definition: captured, moduleFace }
+  return { definition: captured, moduleFace, sandboxWindow, dom }
 }
 
 function makeContext() {
@@ -272,9 +385,15 @@ function makeContext() {
 // ---------- 用例 1：注册契约 ----------
 group('Client 注册契约')
 let moduleFace
+/** 组件里那个 vm 沙箱自己的 window：客户端代码读的是它，不是宿主 globalThis。 */
+let sandboxWindow
+/** 组件所在的极简 DOM：焦点相关的回归断言直接查它。 */
+let sandboxDom
 {
   const loaded = loadPlugin()
   moduleFace = loaded.moduleFace
+  sandboxWindow = loaded.sandboxWindow
+  sandboxDom = loaded.dom
   expect('module id 与包名一致', loaded.definition.id === '@local/dsh-git', loaded.definition.id)
   expect(
     'inject 声明 slots/locale/sidebarRightTabs',
@@ -452,6 +571,196 @@ group('面板渲染')
   expect('文件行渲染出状态字母 M', (html.match(/dshg-k-modified/g) ?? []).length >= 2)
   expect('未跟踪文件用 U 字母', html.includes('>U<'))
   expect('行内暂存/取消暂存按钮都在', html.includes(`${PREFIX}file-actions`))
+
+  // (b2) 丢弃相关：这几个是回归用例，钉住两个曾经出错的点。
+  //   ① 「更改」分组旁边要有一个「全部丢弃」按钮，和「全部暂存」并排；
+  //   ② 未跟踪文件的丢弃按钮必须是**删除**语义 —— 图标 ✕、标题 deleteUntracked，
+  //      不能沿用已跟踪文件的 ↺ / discard。git 里未跟踪文件只能删，没有还原一说。
+  expect('更改分组有「全部暂存」入口', html.includes('title="stageAll"'))
+  expect('更改分组有「全部丢弃」按钮', html.includes('title="discardAll"'))
+  expect('全部丢弃按钮与全部暂存并排', html.indexOf('title="discardAll"') < html.indexOf('title="stageAll"'))
+  expect('未跟踪行的丢弃按钮是删除语义', html.includes('title="deleteUntracked"'))
+  expect('已跟踪行的丢弃按钮仍是放弃语义', html.includes('title="discard"'))
+  expect('未跟踪行用删除图标 ✕', html.includes('>✕<'))
+  expect('已跟踪行用还原图标 ↺', html.includes('>↺<'))
+
+  // (b3) 点「全部丢弃」→ 必须带上确认，且确认后发出 discard-all 动作。
+  //      用 DSH_SMOKE_DEBUG=1 可以看到渲染出的 html。
+  const discardAllButton = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'discardAll')
+  expect('找得到全部丢弃按钮的点击处理器', discardAllButton !== undefined)
+  let prompted = ''
+  const originalConfirm = sandboxWindow.confirm
+  if (discardAllButton !== undefined) {
+    const posts = []
+    globalThis.fetch = async (url, init) => {
+      const text = String(url)
+      requested.push(text)
+      if (init !== undefined && init.method === 'POST') posts.push(JSON.parse(String(init.body)))
+      let payload = {}
+      if (text.includes('/git/status')) payload = stubbed
+      else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+      else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+      else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+      else payload = { ok: true, action: 'discard-all', status: stubbed }
+      return { ok: true, status: 200, json: async () => payload }
+    }
+    // 客户端代码读的是 vm 沙箱里的 window，所以确认框要打在这个对象上，
+    // 顺便记下提示文案；总是返回 true 表示「用户点了确定」。
+    sandboxWindow.confirm = (message) => {
+      prompted = String(message)
+      return true
+    }
+    try {
+      discardAllButton.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalConfirm === undefined) delete sandboxWindow.confirm
+      else sandboxWindow.confirm = originalConfirm
+    }
+    expect('全部丢弃前先弹确认', prompted.includes('discardAllConfirm'), prompted)
+    expect('确认后发出 discard-all 动作', posts.some((body) => body.action === 'discard-all'), posts)
+  }
+
+  // (b4) 贮藏区：必须能**手动选**哪一条，且「应用」与「恢复」是两个不同的动作。
+  //   回归点：早先只有一个 ↑ 按钮，直接对 stashes[0] 发 stash-pop（默认弹最新一个并删除），
+  //   用户既选不了、也会在「只是想应用一下」时把贮藏弄丢。
+  const stashed = {
+    ...stubbed,
+    stashes: [
+      { ref: 'stash@{0}', message: 'On main: 第二条' },
+      { ref: 'stash@{1}', message: 'On main: 第一条' },
+    ],
+  }
+  const stashPosts = []
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    if (init !== undefined && init.method === 'POST') stashPosts.push(JSON.parse(String(init.body)))
+    let payload = {}
+    if (text.includes('/git/status')) payload = stashed
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: stashed }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  let stashHtml = ''
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    stashHtml = instance.rerender(hostProps('D:/demo'))
+
+    // 有贮藏时必须渲染出选择器，且两条都在里面。
+    expect('渲染出贮藏选择器', stashHtml.includes(`${PREFIX}stash-select`), stashHtml.slice(0, 300))
+    expect('选择器里有第一条贮藏', stashHtml.includes('stash@{0}') && stashHtml.includes('第二条'))
+    expect('选择器里有第二条贮藏', stashHtml.includes('stash@{1}') && stashHtml.includes('第一条'))
+    // 关键：默认值是占位项，不能预选最新那条。
+    expect('贮藏选择器默认不选中任何一条', stashHtml.includes('value=""'))
+    expect('渲染出应用（保留）按钮', stashHtml.includes('title="stashApply"') || stashHtml.includes('>stashApply<'))
+    expect('渲染出恢复并删除按钮', stashHtml.includes('>stashPop<'))
+    expect('不再有默认弹最新的裸 ↑ 按钮', stashHtml.includes('title="stashPop"') === false)
+
+    // 未选任何一条时，三个操作按钮都应是禁用的。
+    const stashButtonsBefore = handlers.filter((entry) => entry.event === 'onClick' && (entry.attrs.className ?? '').includes('dshg-btn'))
+    const enabledBefore = stashButtonsBefore.filter((entry) => entry.attrs.disabled !== true)
+    expect('未选贮藏时按钮禁用（提交框按钮除外）', stashButtonsBefore.length > enabledBefore.length)
+
+    // 手动选中 stash@{1}（不是最新的那条），然后点「应用」。
+    const select = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'stashPick')
+    expect('找得到贮藏选择器的 onChange', select !== undefined)
+    sandboxWindow.confirm = () => true
+    if (select !== undefined) {
+      select.handler({ target: { value: 'stash@{1}' } })
+      stashHtml = instance.rerender(hostProps('D:/demo'))
+      const applyButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.children) === 'stashApply')
+      expect('选完能拿到应用按钮', applyButton !== undefined)
+      expect('选中后应用按钮可用', applyButton?.attrs.disabled === false)
+      applyButton?.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    const applyPost = stashPosts.find((body) => body.action === 'stash-apply')
+    expect('应用发出的是 stash-apply（保留）而不是 stash-pop', applyPost !== undefined, stashPosts)
+    expect('应用带上的是手动选中的 stash@{1}', applyPost?.name === 'stash@{1}', applyPost)
+  } catch (error) {
+    expect('贮藏区渲染不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+    delete sandboxWindow.confirm
+  }
+
+  // (b5) 焦点兜底：写操作期间面板按钮会被 disabled，浏览器随即 blur 掉持有焦点的按钮，
+  //   而宿主的焦点恢复逻辑在这种「元素还在、只是被禁用」的情况下不会救场
+  //   （它只看 childList 移除，且 focusout 的 relatedTarget 为 null 时会直接清掉状态）。
+  //   结果就是焦点永久停在 body 上，用户「打字进不了输入框，点哪都恢复不了」。
+  //   这一段钉住两件事：动作后焦点被还回面板容器；用户自己点了别处时绝不抢焦点。
+  const focusStub = {
+    ...stubbed,
+    files: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    staged: [],
+    unstaged: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    stashes: [],
+    clean: false,
+  }
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    let payload = {}
+    if (text.includes('/git/status')) payload = focusStub
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: focusStub }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    const stageAll = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'stageAll')
+    expect('找得到全部暂存按钮（焦点用例）', stageAll !== undefined)
+    const rootElement = sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+    expect('面板根容器进了 DOM 树（ref 生效）', rootElement !== undefined, sandboxDom.body.children.map((item) => item.tag))
+
+    if (rootElement !== undefined && stageAll !== undefined) {
+      // 用挂在面板根下的子元素代表「持有焦点的按钮」。
+      const fakeButton = sandboxDom.createElement('button', rootElement)
+      fakeButton.focus()
+      sandboxDom.document.focusLog.length = 0
+
+      stageAll.handler({})
+      // 真实浏览器会在按钮变成 disabled 的那一刻 blur 它，焦点落到 body。
+      // 替身不会自动做这件事，所以这里把这一步显式演出来——否则测不到真正的场景。
+      sandboxDom.document.activeElement = sandboxDom.body
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      expect('动作后焦点没有停在 body', sandboxDom.document.activeElement !== sandboxDom.body, String(sandboxDom.document.activeElement?.tag))
+      expect('确实对面板容器调用过 focus()', sandboxDom.document.focusLog.includes('div'), sandboxDom.document.focusLog)
+      expect('面板容器带上 tabindex=-1（可编程聚焦且不进 Tab 序列）', rootElement.hasAttribute('tabindex') === true)
+
+      // 反向用例：用户自己把焦点放到了别处（比如会话输入框），此时绝不能被抢走。
+      const elsewhere = sandboxDom.createElement('textarea', sandboxDom.body)
+      instance.rerender(hostProps('D:/demo'))
+      const stageAll2 = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'stageAll')
+      const rootElement2 = sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+      if (stageAll2 !== undefined && rootElement2 !== undefined) {
+        // 动作开始时焦点在面板里（captureFocus 记录为 true）……
+        const insideButton = sandboxDom.createElement('button', rootElement2)
+        insideButton.focus()
+        stageAll2.handler({})
+        // ……但动作期间用户点到了面板外面。
+        elsewhere.focus()
+        sandboxDom.document.focusLog.length = 0
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        expect('用户已把焦点移到面板外时不抢焦点', sandboxDom.document.activeElement === elsewhere, String(sandboxDom.document.activeElement?.tag))
+      }
+    }
+  } catch (error) {
+    expect('焦点用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 
   // (c) 标题槽位：渲染出名字，且不依赖任何 props.view。
   let titleHtml = ''
@@ -726,6 +1035,161 @@ group('真实仓库端到端')
     // 空提交信息被拒
     const emptyMessage = await internals.runAction(dir, 'commit', { message: '   ' })
     expect('空提交信息被拒', emptyMessage.ok === false, emptyMessage)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------- 用例 7b：丢弃 / 删除的语义 ----------
+// 这一段是回归用例：未跟踪文件的「丢弃」在 git 里只能是删除。
+// 早先一律用 `checkout -- <file>`，对未跟踪文件必然以
+// `error: pathspec ... did not match any file(s) known to git` 失败，
+// 于是单个丢弃和「全部丢弃」都报错。
+group('丢弃与删除语义')
+{
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-git-discard-'))
+  const run = (args) => execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+  const exists = (name) => existsSync(join(dir, name))
+  // 读出来的文本统一把 CRLF 折成 LF 再比对：Windows 上 git 默认 autocrlf，
+  // 还原回来的行尾是 CRLF，这是 git 的正常行为，不是被丢弃的内容出错。
+  const text = (name) => readFileSync(join(dir, name), 'utf8').replace(/\r\n/g, '\n')
+  try {
+    run(['init'])
+    run(['config', 'user.email', 'smoke@example.com'])
+    run(['config', 'user.name', 'Smoke Test'])
+    run(['config', 'commit.gpgsign', 'false'])
+    writeFileSync(join(dir, '.gitignore'), 'ignored.txt\n')
+    writeFileSync(join(dir, 'a.txt'), 'one\n')
+    run(['add', '-A'])
+    run(['commit', '-m', 'base'])
+
+    // --- 单个丢弃：未跟踪 = 删除 ---
+    writeFileSync(join(dir, 'brand-new.txt'), 'brand\n')
+    writeFileSync(join(dir, 'a.txt'), 'one\nCHANGED\n')
+    const single = await internals.runAction(dir, 'discard', { files: ['brand-new.txt'] })
+    expect('丢弃未跟踪文件不报错', single.ok === true, single.stderr)
+    expect('未跟踪文件被删除', exists('brand-new.txt') === false)
+    expect('只动点名的文件', exists('a.txt') === true)
+
+    // --- 单个丢弃：已跟踪 = 还原内容（不是删除）---
+    const tracked = await internals.runAction(dir, 'discard', { files: ['a.txt'] })
+    expect('丢弃已跟踪文件不报错', tracked.ok === true, tracked.stderr)
+    expect('已跟踪文件被还原而不是删除', exists('a.txt') === true && text('a.txt') === 'one\n', text('a.txt'))
+
+    // --- 一次同时丢弃「已跟踪 + 未跟踪」：两条路径都要走到 ---
+    writeFileSync(join(dir, 'a.txt'), 'one\nCHANGED\n')
+    writeFileSync(join(dir, 'mixed-new.txt'), 'new\n')
+    const mixed = await internals.runAction(dir, 'discard', { files: ['a.txt', 'mixed-new.txt'] })
+    expect('混合丢弃不报错', mixed.ok === true, mixed.stderr)
+    expect('混合丢弃：已跟踪被还原', text('a.txt') === 'one\n')
+    expect('混合丢弃：未跟踪被删除', exists('mixed-new.txt') === false)
+
+    // --- 全部丢弃 ---
+    writeFileSync(join(dir, 'a.txt'), 'one\nCHANGED\n')
+    writeFileSync(join(dir, 'brand-new.txt'), 'brand\n')
+    writeFileSync(join(dir, 'ignored.txt'), 'build output\n')
+    mkdirSync(join(dir, 'newdir'), { recursive: true })
+    writeFileSync(join(dir, 'newdir', 'deep.txt'), 'deep\n')
+    // 新增并已暂存的文件属于「本周期新加的东西」，全部丢弃时也该消失。
+    writeFileSync(join(dir, 'staged-new.txt'), 'staged\n')
+    run(['add', 'staged-new.txt'])
+
+    const all = await internals.runAction(dir, 'discard-all', {})
+    expect('全部丢弃不报错', all.ok === true, all.stderr)
+    const afterAll = await internals.buildStatus(dir)
+    expect('全部丢弃后工作区干净', afterAll.clean === true, afterAll.files)
+    expect('全部丢弃：已跟踪还原', text('a.txt') === 'one\n')
+    expect('全部丢弃：未跟踪删除', exists('brand-new.txt') === false)
+    expect('全部丢弃：新增未跟踪目录也删掉', exists('newdir') === false)
+    expect('全部丢弃：已暂存的新文件也删掉', exists('staged-new.txt') === false)
+    // 被 .gitignore 忽略的文件是构建产物，误删代价最大，必须保留。
+    expect('全部丢弃保留被忽略的文件', exists('ignored.txt') === true)
+
+    // --- 顺序回归：`checkout --` 取的是**索引**而不是 HEAD ---
+    // 若把它放在 `reset HEAD` 之前，它会把「已暂存的修改」写回工作区，
+    // 之后 reset 再重置索引，那些内容就永久留在了工作区 —— 表现为
+    // 「暂存过的改动丢不掉」。这条用例专门钉住这个顺序。
+    writeFileSync(join(dir, 'a.txt'), 'one\nSTAGED-EDIT\n')
+    run(['add', 'a.txt'])
+    writeFileSync(join(dir, 'a.txt'), 'one\nWORKTREE-EDIT\n')
+    const ordered = await internals.runAction(dir, 'discard-all', {})
+    expect('已暂存后又改过的文件也能丢弃', ordered.ok === true, ordered.stderr)
+    expect('丢弃后回到上次提交的内容', text('a.txt') === 'one\n', text('a.txt'))
+    const afterOrder = await internals.buildStatus(dir)
+    expect('丢弃后索引也干净（无残留暂存）', afterOrder.clean === true, afterOrder.files)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------- 用例 7c：贮藏的应用 / 恢复 / 删除 ----------
+// 这一段钉住两件事：
+//   ① 应用贮藏**保留**该条（stash apply），恢复才删除（stash pop）—— 两者别搞混；
+//   ② 操作对象由调用方显式指定，不再隐式对 stash@{0} 动手。
+group('贮藏：应用保留、恢复删除、显式选条')
+{
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-git-stash-'))
+  const run = (args) => execFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+  const text = (name) => readFileSync(join(dir, name), 'utf8').replace(/\r\n/g, '\n')
+  try {
+    run(['init'])
+    run(['config', 'user.email', 'smoke@example.com'])
+    run(['config', 'user.name', 'Smoke Test'])
+    run(['config', 'commit.gpgsign', 'false'])
+    writeFileSync(join(dir, 'a.txt'), 'base\n')
+    run(['add', '-A'])
+    run(['commit', '-m', 'base'])
+
+    // 造两条内容不同的贮藏：stash@{0} 是后存的（second），stash@{1} 是先存的（first）。
+    writeFileSync(join(dir, 'a.txt'), 'first\n')
+    const first = await internals.runAction(dir, 'stash-save', { message: '第一条' })
+    expect('贮藏第一条成功', first.ok === true, first.stderr)
+    writeFileSync(join(dir, 'a.txt'), 'second\n')
+    const second = await internals.runAction(dir, 'stash-save', { message: '第二条' })
+    expect('贮藏第二条成功', second.ok === true, second.stderr)
+
+    let status = await internals.buildStatus(dir)
+    expect('贮藏列表读到 2 条', status.stashes.length === 2, status.stashes)
+    expect('贮藏按新到旧排列', status.stashes[0].ref === 'stash@{0}' && status.stashes[1].ref === 'stash@{1}', status.stashes.map((item) => item.ref))
+    expect('贮藏说明文字被读到', status.stashes[0].message.includes('第二条'), status.stashes[0].message)
+
+    // --- 应用指定的那条（不是最新那条），并且要保留 ---
+    const applied = await internals.runAction(dir, 'stash-apply', { name: 'stash@{1}' })
+    expect('应用指定贮藏不报错', applied.ok === true, applied.stderr)
+    expect('应用的是选中的那条内容', text('a.txt') === 'first\n', text('a.txt'))
+    status = await internals.buildStatus(dir)
+    expect('应用后贮藏**不**被删除', status.stashes.length === 2, status.stashes.map((item) => item.ref))
+    expect('应用后工作区带上了改动', status.files.some((file) => file.path === 'a.txt'), status.files)
+
+    // 把工作区清干净，好验证下一条
+    await internals.runAction(dir, 'discard-all', {})
+
+    // --- 应用是幂等的可重复操作 ---
+    const reapplied = await internals.runAction(dir, 'stash-apply', { name: 'stash@{1}' })
+    expect('应用可重复执行', reapplied.ok === true, reapplied.stderr)
+    await internals.runAction(dir, 'discard-all', {})
+
+    // --- 恢复指定那条：删掉它，其余保留 ---
+    const popped = await internals.runAction(dir, 'stash-pop', { name: 'stash@{1}' })
+    expect('恢复指定贮藏不报错', popped.ok === true, popped.stderr)
+    expect('恢复的是选中的那条内容', text('a.txt') === 'first\n', text('a.txt'))
+    status = await internals.buildStatus(dir)
+    expect('恢复后只剩 1 条', status.stashes.length === 1, status.stashes.map((item) => item.ref))
+    expect('剩下的是没动的那条', status.stashes[0].message.includes('第二条'), status.stashes[0].message)
+
+    // --- 不带 ref 一律拒绝：避免隐式对最新一条动手 ---
+    const noRefApply = await internals.runAction(dir, 'stash-apply', {})
+    expect('应用不给 ref 被拒', noRefApply.ok === false, noRefApply)
+    const noRefPop = await internals.runAction(dir, 'stash-pop', {})
+    expect('恢复不给 ref 被拒', noRefPop.ok === false, noRefPop)
+    status = await internals.buildStatus(dir)
+    expect('被拒的操作没有动到贮藏', status.stashes.length === 1, status.stashes.map((item) => item.ref))
+
+    // --- 删除指定那条 ---
+    const dropped = await internals.runAction(dir, 'stash-drop', { name: 'stash@{0}' })
+    expect('删除指定贮藏成功', dropped.ok === true, dropped.stderr)
+    status = await internals.buildStatus(dir)
+    expect('删除后贮藏清空', status.stashes.length === 0, status.stashes)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

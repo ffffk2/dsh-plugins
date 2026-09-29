@@ -43,7 +43,7 @@ const ACTION_PATH = '/git/action'
  * 改了这个文件必须重启 DSH 才会生效（Node 缓存已导入的 ES 模块）。把它回报给页面，
  * 「页面看起来正常、跑的却是旧代码」就能当场看出来。**每次改这个文件都顺手加一。**
  */
-const HOST_BUILD = 1
+const HOST_BUILD = 3
 
 /** git 命令超时（毫秒）。fetch/push 会慢一些，单独放宽。 */
 const TIMEOUT_MS = 20_000
@@ -402,6 +402,89 @@ async function buildBranches(root) {
 }
 
 /**
+ * 判断一组路径里哪些是未跟踪文件。
+ *
+ * 用 `ls-files --others --exclude-standard`：只有它认识「未跟踪」，且会遵守 .gitignore，
+ * 所以被忽略的文件不会被误当成可删的未跟踪文件。用 `--error-unmatch` 之类去试探
+ * `git ls-files --` 反而不行——已跟踪但被删除的文件也不在 ls-files 输出里。
+ * @param root - 仓库根目录。
+ * @param files - 相对仓库根的路径数组。
+ * @returns 未跟踪路径的 Set。
+ */
+async function untrackedSet(root, files) {
+  if (files.length === 0) return new Set()
+  const result = await git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', ...files])
+  if (!result.ok) return new Set()
+  return new Set(result.stdout.split('\0').filter((value) => value !== ''))
+}
+
+/**
+ * 合并两次 git 调用的结果。
+ *
+ * `discard` 这类动作可能拆成两条命令跑，页面只认 {ok, stdout, stderr, code} 四个字段，
+ * 所以这里把两条拼成一份：任一失败即整体失败，报错优先显示失败那条。
+ * @param results - git() 的返回值数组。
+ */
+function mergeGitResults(results) {
+  const failed = results.find((result) => !result.ok)
+  const target = failed ?? results[results.length - 1]
+  return {
+    ok: failed === undefined,
+    code: target === undefined ? 0 : target.code,
+    stdout: results.map((result) => result.stdout).filter((value) => value !== '').join('\n'),
+    stderr: results.map((result) => result.stderr).filter((value) => value !== '').join('\n'),
+  }
+}
+
+/**
+ * 丢弃若干文件的本地更改。
+ *
+ * **未跟踪文件是删除操作**：git 没有它们的备份，`checkout -- <file>` 会直接
+ * 报 `pathspec did not match any file(s) known to git` ——这正是「单个丢弃未跟踪
+ * 文件报错」的原因。未跟踪只能靠 `clean -f` 删掉，没有别的语义可选。
+ * 已跟踪的文件仍走 `checkout --`：它对暂存区与工作区一起还原，且不会误删新文件。
+ * @param root - 仓库根目录。
+ * @param files - 相对仓库根的路径数组。
+ */
+async function discardFiles(root, files) {
+  if (files.length === 0) return { ok: false, stdout: '', stderr: 'no files', code: 1 }
+  const untracked = await untrackedSet(root, files)
+  const tracked = files.filter((file) => !untracked.has(file))
+  const results = []
+  if (tracked.length > 0) results.push(await git(root, ['checkout', '--', ...tracked]))
+  if (untracked.size > 0) {
+    // -f 必需（clean 默认拒绝动手），不加 -d/-x：只删用户点名的文件，
+    // 不连累被忽略的目录与文件。路径用 `--` 隔开，避免与文件名同形的选项歧义。
+    results.push(await git(root, ['clean', '-f', '--', ...[...untracked]]))
+  }
+  return mergeGitResults(results)
+}
+
+/**
+ * 丢弃工作区与暂存区的全部更改，等价于「全部暂存」的反操作。
+ *
+ * 三步的顺序**不能**调换，每一步都为下一步扫清障碍：
+ *   ① `reset HEAD`：先把索引拨回 HEAD。此后索引即 HEAD，「暂存的更改」全部消失。
+ *      新增并已暂存的文件（尚未出现在 HEAD 里）会就此变成未跟踪——它本就是
+ *      「这个提交周期里新加的东西」，理应被整份删掉，正好交给下一步的 `clean`。
+ *      这一步必须最先做，原因见 ③。
+ *   ② `clean -fd`：删掉全部未跟踪文件与目录。不带 `-x`：被 .gitignore 忽略的文件
+ *      （构建产物、node_modules）保留——这是丢弃操作里最容易造成真实损失的地方，宁可少删。
+ *   ③ `checkout -- .`：把工作区还原成**索引**的内容。这里的顺序最反直觉：`checkout --`
+ *      取的是索引而不是 HEAD，若放在 ① 之前，它会先把「已暂存的修改」写回工作区，
+ *      等 ① 再重置索引，那些内容就永久留在了工作区里 —— 结果是「暂存过的改动丢不掉」。
+ *      放在 ① 之后，索引已等于 HEAD，于是它才真正起到「还原到上次提交」的作用。
+ * @param root - 仓库根目录。
+ */
+async function discardEverything(root) {
+  return mergeGitResults([
+    await git(root, ['reset', 'HEAD']),
+    await git(root, ['clean', '-fd']),
+    await git(root, ['checkout', '--', '.']),
+  ])
+}
+
+/**
  * 执行一个写操作。
  *
  * 全部写操作集中在这里，是为了让「哪些动作会改动仓库」一眼可数，
@@ -423,7 +506,12 @@ async function runAction(root, action, payload) {
       // 仓库可能还没有 HEAD（首次提交前）：此时 `reset HEAD` 会失败，用 `rm --cached` 退回。
       return git(root, pathspec.length > 0 ? ['reset', 'HEAD', '--', ...files] : ['reset', 'HEAD'])
     case 'discard':
-      return git(root, ['checkout', '--', ...files])
+      return discardFiles(root, files)
+    case 'discard-all':
+      // 全部丢弃 = 已跟踪的还原到 HEAD + 未跟踪的删掉，和「全部暂存」对称。
+      // 分两步是有意的：`checkout -- .` 碰不到未跟踪文件，而 `clean -fd .`
+      // 又不会还原已跟踪文件的修改，单靠任何一条都做不完整。
+      return discardEverything(root)
     case 'stage-all':
       return git(root, ['add', '-A'])
     case 'unstage-all':
@@ -468,8 +556,15 @@ async function runAction(root, action, payload) {
       return git(root, ['push', '-u', 'origin', 'HEAD'], { timeout: NETWORK_TIMEOUT_MS })
     case 'stash-save':
       return git(root, ['stash', 'push', '--include-untracked', ...(message.trim() === '' ? [] : ['-m', message])])
+    // stash-apply：恢复后**保留**该条贮藏；stash-pop：恢复并从栈里删掉。
+    // 两者都必须显式给出 ref（默认的 stash@{0} 只是「最新一条」，而这个面板让用户选）
+    // ——不给就拒绝，避免「以为在恢复某条、实际动了最新那条」。
+    case 'stash-apply':
+      if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
+      return git(root, ['stash', 'apply', name])
     case 'stash-pop':
-      return git(root, ['stash', 'pop'])
+      if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
+      return git(root, ['stash', 'pop', name])
     case 'stash-drop':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
       return git(root, ['stash', 'drop', name])
@@ -738,6 +833,9 @@ export const __internals = {
   buildCommit,
   buildBranches,
   runAction,
+  untrackedSet,
+  discardFiles,
+  discardEverything,
 }
 /** 默认 DSH 主目录，供将来扩展共享配置时使用。 */
 export const __defaultHome = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.trim() !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh')
