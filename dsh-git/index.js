@@ -43,12 +43,25 @@ const ACTION_PATH = '/git/action'
  * 改了这个文件必须重启 DSH 才会生效（Node 缓存已导入的 ES 模块）。把它回报给页面，
  * 「页面看起来正常、跑的却是旧代码」就能当场看出来。**每次改这个文件都顺手加一。**
  */
-const HOST_BUILD = 3
+const HOST_BUILD = 4
 
 /** git 命令超时（毫秒）。fetch/push 会慢一些，单独放宽。 */
 const TIMEOUT_MS = 20_000
 /** 网络类命令的超时。 */
 const NETWORK_TIMEOUT_MS = 120_000
+/**
+ * 写操作的超时。
+ *
+ * 比只读命令宽松得多，因为写操作动的是**整个工作区**：`stash apply/pop` 要把
+ * 一堆文件写回磁盘，`stash push` 要读遍全部改动，`discard-all` 要还原加删除。
+ * 大仓库在 Windows 上叠上杀毒扫描，20s 很容易不够。
+ *
+ * 超时的后果特别恶劣：Node 会 SIGTERM 掉 git，而 git **可能已经把改动落盘了**；
+ * 返回的却是 ok=false、stderr 为空——页面只能显示兜底文案「操作没有返回信息」，
+ * 用户看到「明明应用成功了却报错」。这正是「应用贮藏报错」的根因，
+ * 所以写操作一律走这个更宽松的超时，并由 killed 字段把「被中断」如实报出来。
+ */
+const WRITE_TIMEOUT_MS = 120_000
 /** 单次 diff 的最大字符数，超出截断并标记 truncated。 */
 const MAX_DIFF_CHARS = 400_000
 /** 单条命令 stdout 的硬上限，防止 OOM。 */
@@ -436,6 +449,10 @@ function mergeGitResults(results) {
     code: target === undefined ? 0 : target.code,
     stdout: results.map((result) => result.stdout).filter((value) => value !== '').join('\n'),
     stderr: results.map((result) => result.stderr).filter((value) => value !== '').join('\n'),
+    // killed 必须一起带上：多步操作（discard / discard-all）里任何一步被超时打断，
+    // 页面都得知道「这是被中断、不是 git 报错」——否则又会退回
+    // 「stderr 为空 ⇒ 操作没有返回信息」那种把真相盖住的提示。
+    killed: results.some((result) => result.killed === true),
   }
 }
 
@@ -448,17 +465,18 @@ function mergeGitResults(results) {
  * 已跟踪的文件仍走 `checkout --`：它对暂存区与工作区一起还原，且不会误删新文件。
  * @param root - 仓库根目录。
  * @param files - 相对仓库根的路径数组。
+ * @param options - 可覆盖超时等 git() 选项。
  */
-async function discardFiles(root, files) {
+async function discardFiles(root, files, options = {}) {
   if (files.length === 0) return { ok: false, stdout: '', stderr: 'no files', code: 1 }
   const untracked = await untrackedSet(root, files)
   const tracked = files.filter((file) => !untracked.has(file))
   const results = []
-  if (tracked.length > 0) results.push(await git(root, ['checkout', '--', ...tracked]))
+  if (tracked.length > 0) results.push(await git(root, ['checkout', '--', ...tracked], options))
   if (untracked.size > 0) {
     // -f 必需（clean 默认拒绝动手），不加 -d/-x：只删用户点名的文件，
     // 不连累被忽略的目录与文件。路径用 `--` 隔开，避免与文件名同形的选项歧义。
-    results.push(await git(root, ['clean', '-f', '--', ...[...untracked]]))
+    results.push(await git(root, ['clean', '-f', '--', ...[...untracked]], options))
   }
   return mergeGitResults(results)
 }
@@ -478,12 +496,13 @@ async function discardFiles(root, files) {
  *      等 ① 再重置索引，那些内容就永久留在了工作区里 —— 结果是「暂存过的改动丢不掉」。
  *      放在 ① 之后，索引已等于 HEAD，于是它才真正起到「还原到上次提交」的作用。
  * @param root - 仓库根目录。
+ * @param options - 可覆盖超时等 git() 选项。
  */
-async function discardEverything(root) {
+async function discardEverything(root, options = {}) {
   return mergeGitResults([
-    await git(root, ['reset', 'HEAD']),
-    await git(root, ['clean', '-fd']),
-    await git(root, ['checkout', '--', '.']),
+    await git(root, ['reset', 'HEAD'], options),
+    await git(root, ['clean', '-fd'], options),
+    await git(root, ['checkout', '--', '.'], options),
   ])
 }
 
@@ -501,36 +520,45 @@ async function runAction(root, action, payload) {
   const pathspec = files.length > 0 ? ['--', ...files] : []
   const name = typeof payload.name === 'string' ? payload.name.trim() : ''
   const message = typeof payload.message === 'string' ? payload.message : ''
+  /**
+   * 写操作专用入口：一律走宽松超时。
+   *
+   * 写操作动的是整个工作区，20s 在大仓库上不够；一旦超时，git 会被杀掉，
+   * 而改动可能已经落盘，页面却只看到「stderr 为空」的失败——见 WRITE_TIMEOUT_MS 的说明。
+   * 全部写操作都从这里出去，就不会有哪个动作漏掉这个超时。
+   */
+  const write = (args) => git(root, args, { timeout: WRITE_TIMEOUT_MS })
+  const writeOptions = { timeout: WRITE_TIMEOUT_MS }
 
   switch (action) {
     case 'stage':
-      return git(root, pathspec.length > 0 ? ['add', '--', ...files] : ['add', '-A'])
+      return write(pathspec.length > 0 ? ['add', '--', ...files] : ['add', '-A'])
     case 'unstage':
       // 仓库可能还没有 HEAD（首次提交前）：此时 `reset HEAD` 会失败，用 `rm --cached` 退回。
-      return git(root, pathspec.length > 0 ? ['reset', 'HEAD', '--', ...files] : ['reset', 'HEAD'])
+      return write(pathspec.length > 0 ? ['reset', 'HEAD', '--', ...files] : ['reset', 'HEAD'])
     case 'discard':
-      return discardFiles(root, files)
+      return discardFiles(root, files, writeOptions)
     case 'discard-all':
       // 全部丢弃 = 已跟踪的还原到 HEAD + 未跟踪的删掉，和「全部暂存」对称。
       // 分两步是有意的：`checkout -- .` 碰不到未跟踪文件，而 `clean -fd .`
       // 又不会还原已跟踪文件的修改，单靠任何一条都做不完整。
-      return discardEverything(root)
+      return discardEverything(root, writeOptions)
     case 'stage-all':
-      return git(root, ['add', '-A'])
+      return write(['add', '-A'])
     case 'unstage-all':
-      return git(root, ['reset', 'HEAD'])
+      return write(['reset', 'HEAD'])
     case 'commit':
       if (message.trim() === '') return { ok: false, stdout: '', stderr: 'empty message', code: 1 }
-      return git(root, ['commit', '-m', message])
+      return write(['commit', '-m', message])
     case 'commit-amend':
       if (message.trim() === '') return { ok: false, stdout: '', stderr: 'empty message', code: 1 }
-      return git(root, ['commit', '--amend', '-m', message])
+      return write(['commit', '--amend', '-m', message])
     case 'checkout':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
-      return git(root, ['checkout', name])
+      return write(['checkout', name])
     case 'checkout-commit':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty commit', code: 1 }
-      return git(root, ['checkout', '--detach', name])
+      return write(['checkout', '--detach', name])
     case 'create-branch':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
       // 从指定起点建分支。startPoint 可以是本地分支、远程分支（origin/x）或提交哈希。
@@ -538,17 +566,17 @@ async function runAction(root, action, payload) {
       // --no-track：从远程分支建本地分支时，git 默认会把上游设成它。
       //   那是 `checkout -b` 的隐式行为，用户在下拉框里选「origin/main」通常只是想要
       //   「以它为起点」，并不期待顺带绑定上游，所以这里显式关掉，避免意外。
-      return git(root, ['checkout', '-b', name, ...(typeof payload.startPoint === 'string' && payload.startPoint.trim() !== '' ? ['--no-track', payload.startPoint.trim()] : [])])
+      return write(['checkout', '-b', name, ...(typeof payload.startPoint === 'string' && payload.startPoint.trim() !== '' ? ['--no-track', payload.startPoint.trim()] : [])])
     case 'merge':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
       // 合并分两种：普通合并会新建合并提交；--ff-only 只在能快进时成功。
       // 冲突时 git 会以非 0 退出并留下冲突标记，页面上按「有冲突」显示，工作区里自行解决。
-      return git(root, ['merge', ...(payload.ffOnly === true ? ['--ff-only'] : ['--no-ff']), ...(message.trim() === '' ? [] : ['-m', message]), name])
+      return write(['merge', ...(payload.ffOnly === true ? ['--ff-only'] : ['--no-ff']), ...(message.trim() === '' ? [] : ['-m', message]), name])
     case 'merge-abort':
-      return git(root, ['merge', '--abort'])
+      return write(['merge', '--abort'])
     case 'delete-branch':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty branch', code: 1 }
-      return git(root, ['branch', payload.force === true ? '-D' : '-d', name])
+      return write(['branch', payload.force === true ? '-D' : '-d', name])
     case 'fetch':
       return git(root, ['fetch', '--all', '--prune'], { timeout: NETWORK_TIMEOUT_MS })
     case 'pull':
@@ -558,21 +586,21 @@ async function runAction(root, action, payload) {
     case 'push-upstream':
       return git(root, ['push', '-u', 'origin', 'HEAD'], { timeout: NETWORK_TIMEOUT_MS })
     case 'stash-save':
-      return git(root, ['stash', 'push', '--include-untracked', ...(message.trim() === '' ? [] : ['-m', message])])
+      return write(['stash', 'push', '--include-untracked', ...(message.trim() === '' ? [] : ['-m', message])])
     // stash-apply：恢复后**保留**该条贮藏；stash-pop：恢复并从栈里删掉。
     // 两者都必须显式给出 ref（默认的 stash@{0} 只是「最新一条」，而这个面板让用户选）
     // ——不给就拒绝，避免「以为在恢复某条、实际动了最新那条」。
     case 'stash-apply':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
-      return git(root, ['stash', 'apply', name])
+      return write(['stash', 'apply', name])
     case 'stash-pop':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
-      return git(root, ['stash', 'pop', name])
+      return write(['stash', 'pop', name])
     case 'stash-drop':
       if (name === '') return { ok: false, stdout: '', stderr: 'empty stash', code: 1 }
-      return git(root, ['stash', 'drop', name])
+      return write(['stash', 'drop', name])
     case 'init':
-      return git(root, ['init'])
+      return write(['init'])
     default:
       return { ok: false, stdout: '', stderr: `unknown action: ${action}`, code: 1 }
   }
@@ -797,6 +825,9 @@ export function apply(ctx, rawConfig) {
       stdout: clampText(result.stdout, 20_000).text,
       stderr: clampText(result.stderr, 20_000).text,
       message: result.ok ? result.stdout.trim() : result.stderr.trim(),
+      // 进程被超时/信号打断时 stderr 往往是空的，只有这个标记能说明真相：
+      // 失败不是 git 报的错，而是命令被中断——而改动**可能已经落盘**。
+      killed: result.killed === true,
     }
     // 写操作之后顺手回报最新状态：少一次往返，也让「提交完列表没变」这类问题消失。
     if (result.ok) {
@@ -839,6 +870,7 @@ export const __internals = {
   untrackedSet,
   discardFiles,
   discardEverything,
+  mergeGitResults,
 }
 /** 默认 DSH 主目录，供将来扩展共享配置时使用。 */
 export const __defaultHome = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME.trim() !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh')

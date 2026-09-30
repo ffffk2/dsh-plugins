@@ -43,6 +43,20 @@ function expect(label, condition, detail) {
 let hooks = []
 let hookIndex = 0
 let handlers = []
+/**
+ * 本轮渲染排队的 effect 回调。
+ *
+ * 真实 React 在 commit 之后才跑 effect，此时 ref 已经挂好、DOM 也已经换完。
+ * 替身必须照这个顺序来，否则「effect 里读 ref 读到旧节点」这类时序 bug
+ * 在测试里永远暴露不出来（本插件就踩过这个坑）。
+ */
+let pendingEffects = []
+/** 把排队的 effect 跑掉；由最外层 rerender 在整棵树建好之后调用。 */
+function flushEffects() {
+  const queued = pendingEffects
+  pendingEffects = []
+  for (const run of queued) run()
+}
 /** 顶层渲染入口要调它：把 hook 状态重置成全新实例。 */
 function resetHooks() {
   hooks = []
@@ -93,10 +107,15 @@ const React = {
     const previous = slot[index]
     if (sameDeps(previous?.deps, deps)) return
     slot[index] = { deps, cleanup: undefined }
-    // 副作用返回的清理函数先记下，下次重跑前调用。
-    if (typeof previous?.cleanup === 'function') previous.cleanup()
-    const result = fn()
-    if (typeof result === 'function') slot[index].cleanup = result
+    // 关键：**排队**而不是当场执行，等整棵树渲染完、ref 挂好之后再 flush。
+    // 真实 React 的顺序是「render（建树、挂 ref）→ commit → effect」，
+    // 早先这里在组件函数体里同步跑 effect，于是 effect 里读 ref 拿到的还是
+    // 上一轮的节点——「根节点被换掉后焦点悬空」这个 bug 就是这么被替身掩盖掉的。
+    if (typeof previous?.cleanup === 'function') pendingEffects.push(previous.cleanup)
+    pendingEffects.push(() => {
+      const result = fn()
+      if (typeof result === 'function') slot[index].cleanup = result
+    })
   },
   // useMemo / useCallback 必须按依赖数组决定要不要重算，跟真实 React 一致。
   // 早先只算一次就永久缓存，于是「依赖变了但值没更新」——比如贮藏下拉框选中
@@ -139,8 +158,33 @@ function textOf(node) {
   return ''
 }
 
-/** 当前渲染所属的极简 DOM（由 loadPlugin 建好），以及本次渲染的 DOM 挂载点。 */
-let currentDom = null
+/**
+ * 从渲染出的 HTML 里截取一个 **div 的完整子树**。
+ *
+ * 渲染器输出的是没有换行的嵌套 HTML，想断言「某控件在某个区块内部」就只能按
+ * 标签配对来切。这里只处理 div（本插件的容器都是 div），按出现顺序维护深度。
+ * @param html - 完整 HTML。
+ * @param start - 起始 `<div` 的下标；小于 0 时返回空串。
+ * @returns 从 start 到与之配对的 `</div>` 之间的子串。
+ */
+function extractDiv(html, start) {
+  if (start < 0 || start >= html.length) return ''
+  let depth = 0
+  const tagPattern = /<div\b|<\/div>/g
+  tagPattern.lastIndex = start
+  let match
+  while ((match = tagPattern.exec(html)) !== null) {
+    if (match[0] === '</div>') {
+      depth -= 1
+      if (depth === 0) return html.slice(start, match.index + '</div>'.length)
+    } else {
+      depth += 1
+    }
+  }
+  return html.slice(start)
+}
+
+/** 当前渲染所属的极简 DOM（由 loadPlugin 建好），以及本次渲染的 DOM 挂载点。 */let currentDom = null
 let domParent = null
 
 /** 递归把一棵子树标记成「已从文档移除」，模拟 React 卸载。 */
@@ -230,8 +274,11 @@ function mount(component, props) {
       currentDom.body.children.length = 0
     }
     domParent = currentDom?.body ?? null
+    pendingEffects = []
     const html = render(React.createElement(component, nextProps ?? props))
     rootHooks = hooks
+    // 树建完、ref 挂好，才轮到 effect——和真实 React 的 commit 顺序一致。
+    flushEffects()
     return html
   }
   const html = rerender(props)
@@ -689,6 +736,62 @@ group('面板渲染')
     delete sandboxWindow.confirm
   }
 
+  // (b4b) 贮藏区的位置：必须落在「更改」（未暂存）区块里，而不是提交框下面。
+  //   应用贮藏产出的正是未暂存的改动，控件该和它影响的那份列表在一起。
+  //   更要紧的是**工作区干净时也必须能看到它**——那种情况下用户恰恰最需要把贮藏取出来，
+  //   所以「更改」区块不能因为 unstaged 为空就整个不渲染。
+  const cleanWithStash = {
+    ...stubbed,
+    files: [],
+    staged: [],
+    unstaged: [],
+    stashes: [
+      { ref: 'stash@{0}', message: 'On main: 干净工作区里的贮藏' },
+    ],
+    clean: true,
+  }
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    if (init !== undefined && init.method === 'POST') stashPosts.push(JSON.parse(String(init.body)))
+    let payload = {}
+    if (text.includes('/git/status')) payload = cleanWithStash
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: cleanWithStash }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  let cleanHtml = ''
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    cleanHtml = instance.rerender(hostProps('D:/demo'))
+
+    // 干净工作区 + 有贮藏 ⇒ 贮藏选择器必须还在。
+    expect('工作区干净时贮藏区仍然可见', cleanHtml.includes(`${PREFIX}stash-select`), cleanHtml.slice(0, 400))
+    expect('工作区干净时不再显示「没有检测到更改」', cleanHtml.includes('cleanHint') === false)
+
+    // 已从提交框里挪走。注意两点：要按**元素**找（`dshg-commit-box` 这个名字在
+    // <style> 的 CSS 文本里也出现，直接 indexOf 会截到 CSS 上去），而且这个极简
+    // 渲染器输出的是 JSX 形态的属性名（`className=` 而不是 `class=`）。
+    const commitBox = extractDiv(cleanHtml, cleanHtml.indexOf('<div className="dshg-commit-box">'))
+    expect('提交框里不再包含贮藏区', commitBox !== '' && commitBox.includes(PREFIX + 'stash') === false, commitBox.slice(0, 200))
+
+    // 且确实落在「更改」区块内部。同样要认区块标题这个元素，
+    // 不能用 `>changes<`——页签按钮上的文案也是它，会指错地方。
+    const titleMarker = `${PREFIX}section-title">changes<`
+    const changesTitleAt = cleanHtml.indexOf(titleMarker)
+    const changesSectionAt = cleanHtml.lastIndexOf('<div className="dshg-section">', changesTitleAt)
+    const changesSection = extractDiv(cleanHtml, changesSectionAt)
+    expect('找得到「更改」区块', changesTitleAt >= 0 && changesSectionAt >= 0, { changesTitleAt, changesSectionAt })
+    expect('贮藏区位于「更改」区块内部', changesSection.includes(PREFIX + 'stash-select'), changesSection.slice(0, 200))
+  } catch (error) {
+    expect('贮藏区位置用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
   // (b5) 焦点兜底：写操作期间面板按钮会被 disabled，浏览器随即 blur 掉持有焦点的按钮，
   //   而宿主的焦点恢复逻辑在这种「元素还在、只是被禁用」的情况下不会救场
   //   （它只看 childList 移除，且 focusout 的 relatedTarget 为 null 时会直接清掉状态）。
@@ -736,7 +839,22 @@ group('面板渲染')
       await new Promise((resolve) => setTimeout(resolve, 40))
 
       expect('动作后焦点没有停在 body', sandboxDom.document.activeElement !== sandboxDom.body, String(sandboxDom.document.activeElement?.tag))
-      expect('确实对面板容器调用过 focus()', sandboxDom.document.focusLog.includes('div'), sandboxDom.document.focusLog)
+      // 优先还给动作前持有焦点的那个控件：它是看得见的（带焦点环），
+      // 而面板容器是个不可见 div，焦点落上去用户只会觉得「不知道跑哪去了」。
+      expect('焦点还给动作前持有焦点的那个控件', sandboxDom.document.activeElement === fakeButton, sandboxDom.document.focusLog)
+
+      // 场景二：动作期间那个控件被卸载（区块收起、列表重排都会发生）——
+      //   这时必须退到面板容器，而且容器要能编程聚焦（tabindex=-1），
+      //   否则焦点又掉回 body —— 「打字进不了输入框」的老毛病。
+      const doomed = sandboxDom.createElement('button', rootElement)
+      doomed.focus()
+      sandboxDom.document.focusLog.length = 0
+      stageAll.handler({})
+      sandboxDom.document.activeElement = sandboxDom.body
+      markDisconnected(doomed)
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      expect('控件已被卸载时不把焦点塞回它', sandboxDom.document.activeElement !== doomed, sandboxDom.document.focusLog)
+      expect('控件已被卸载时焦点退到面板容器', sandboxDom.document.activeElement === rootElement, sandboxDom.document.focusLog)
       expect('面板容器带上 tabindex=-1（可编程聚焦且不进 Tab 序列）', rootElement.hasAttribute('tabindex') === true)
 
       // 反向用例：用户自己把焦点放到了别处（比如会话输入框），此时绝不能被抢走。
@@ -760,6 +878,386 @@ group('面板渲染')
     expect('焦点用例不报错', false, error.message)
   } finally {
     globalThis.fetch = originalFetch
+  }
+
+  // (b6) 焦点悬空：本插件把焦点放到根容器后，那一轮提交把根节点整个换掉了。
+  //   回归点：`restoreFocus` 在 run() 的 finally 里跑，它的 microtask 很可能排在
+  //   React 提交**之前**——那一刻 rootRef.current 还是旧根节点 R0 且仍然 connected，
+  //   于是 focus 成功；紧接着 setStatus 那一轮把 R0 换成 R1，R0 被卸载，而
+  //   document.activeElement 仍指着 R0。焦点卡在一个脱离文档的节点上，宿主的
+  //   observeSidebarFocus 用 closest 找不到它的 pane，既捕获不到也无从恢复——
+  //   用户表现就是「应用贮藏后焦点不知道跑哪去了，打字进不了输入框」。
+  //   这一段钉住：换根之后焦点必须被收回到**当前活着的**根节点上。
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    let payload = {}
+    if (text.includes('/git/status')) payload = focusStub
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: focusStub }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    const stageAll3 = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'stageAll')
+    const oldRoot = sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+    expect('找得到全部暂存按钮（换根用例）', stageAll3 !== undefined && oldRoot !== undefined)
+
+    if (stageAll3 !== undefined && oldRoot !== undefined) {
+      // 动作开始时焦点在面板里；按钮被 busy 禁用后浏览器把焦点丢给 body。
+      const insideButton = sandboxDom.createElement('button', oldRoot)
+      insideButton.focus()
+      stageAll3.handler({})
+      sandboxDom.document.activeElement = sandboxDom.body
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      // 第一段：常规还焦点把焦点放回了动作前持有的那个控件上。
+      expect('还焦点落回动作前持有的控件', sandboxDom.document.activeElement === insideButton, String(sandboxDom.document.activeElement?.tag))
+
+      // 第二段：模拟 React 提交把整个面板子树换成新的根节点——
+      //   连那个控件一起被卸载，浏览器不会帮忙改 activeElement，
+      //   所以焦点此刻仍指着已经脱离文档的控件。
+      instance.rerender(hostProps('D:/demo'))
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      const newRoot = sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+      const focused = sandboxDom.document.activeElement
+      expect('换根后焦点不再停在已卸载的节点上', focused !== oldRoot && focused !== insideButton, String(focused?.tag))
+      expect('换根后焦点被收回到当前活着的根容器上', focused === newRoot, String(focused?.tag))
+      expect('换根后焦点节点确实还在文档里', focused?.isConnected !== false && sandboxDom.body.children.includes(focused))
+      expect('旧根节点确实已经卸载（前提成立）', oldRoot.isConnected === false)
+    }
+  } catch (error) {
+    expect('换根焦点用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  // (b7) 动作失败时的两件事：文案要说清真相，界面不能停在旧快照上。
+  //   起因是「应用贮藏报错：操作没有返回信息」，而改动其实已经生效了：
+  //   git 在写盘途中被超时 SIGTERM 掉，stderr 是空的 —— 此时
+  //     · 兜底文案「操作没有返回信息」把真相盖住了，用户只会以为操作失败；
+  //     · run() 在失败分支直接 return，连状态都不刷新，面板于是继续显示
+  //       操作前的「工作区干净」。
+  //   所以这里钉两件事：killed 要给出「结果未知、改动可能已生效」的提示；
+  //   失败后必须重新拉一次状态（用「第二次 status 返回了新文件」来证明它真的重拉了）。
+  const beforeFailure = {
+    ...stubbed,
+    files: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    staged: [],
+    unstaged: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    stashes: [],
+    clean: false,
+  }
+  const afterFailure = {
+    ...beforeFailure,
+    files: [
+      { path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' },
+      { path: 'restored-by-stash.txt', x: '??', y: '??', staged: false, kind: 'untracked' },
+    ],
+    unstaged: [
+      { path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' },
+      { path: 'restored-by-stash.txt', x: '??', y: '??', staged: false, kind: 'untracked' },
+    ],
+  }
+  let statusCalls = 0
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    if (init !== undefined && init.method === 'POST') {
+      // 关键形态：ok=false 但 message 为空、killed=true —— 正是超时被杀的返回值。
+      return { ok: true, status: 200, json: async () => ({ ok: false, code: 1, message: '', killed: true }) }
+    }
+    if (text.includes('/git/status')) {
+      statusCalls += 1
+      return { ok: true, status: 200, json: async () => (statusCalls === 1 ? beforeFailure : afterFailure) }
+    }
+    if (text.includes('/git/diff')) return { ok: true, status: 200, json: async () => ({ file: 'a.txt', diff: '', truncated: false, error: null }) }
+    if (text.includes('/git/log')) return { ok: true, status: 200, json: async () => ({ commits: [], hasMore: false, error: null }) }
+    return { ok: true, status: 200, json: async () => ({ locals: [], remotes: [], error: null }) }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    const statusBefore = statusCalls
+    const stageAll4 = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'stageAll')
+    expect('找得到全部暂存按钮（失败用例）', stageAll4 !== undefined)
+
+    if (stageAll4 !== undefined) {
+      stageAll4.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      const failedHtml = instance.rerender(hostProps('D:/demo'))
+
+      expect('被中断的失败不再显示「操作没有返回信息」', failedHtml.includes('actionFailedNoMessage') === false, failedHtml.slice(0, 300))
+      expect('被中断的失败提示「改动可能已生效」', failedHtml.includes('actionTimeout'), failedHtml.slice(0, 300))
+      expect('失败后重新拉取了状态', statusCalls > statusBefore, { statusBefore, statusCalls })
+      // 最有力的一条：第二次 status 才出现的新文件必须渲染出来。
+      // 若失败分支没有刷新，这里会停在旧快照上、看不到它。
+      expect('失败后界面反映的是最新状态（不再停在旧快照）', failedHtml.includes('restored-by-stash.txt'), failedHtml.slice(0, 400))
+    }
+  } catch (error) {
+    expect('失败文案用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  // (b8) 确认框与焦点：「应用贮藏（保留）」点完之后输入框打不了字，根因就在这个顺序上。
+  //   确认框必须弹在「记下当前焦点」**之后**：原生确认框会把焦点交给系统
+  //   （Chromium 里 activeElement 直接掉到 body），等到了 handler 里再读 activeElement，
+  //   读到的已经是 body ——「动之前焦点在面板里」永远为假，还焦点的分支根本不会跑，
+  //   焦点就永久停在 body 上（宿主的 observeSidebarFocus 也救不了，见前面的说明）。
+  //   所以这里用一个「确认时把焦点打回 body」的替身，钉住「弹窗之后焦点仍然回到面板」。
+  const confirmFixture = {
+    ...stubbed,
+    files: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    staged: [],
+    unstaged: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    stashes: [{ ref: 'stash@{0}', message: 'On main: 干净工作区里的贮藏' }, { ref: 'stash@{1}', message: 'On main: 第二条' }],
+    clean: false,
+  }
+  const confirmPosts = []
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    if (init !== undefined && init.method === 'POST') confirmPosts.push(JSON.parse(String(init.body)))
+    let payload = {}
+    if (text.includes('/git/status')) payload = confirmFixture
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: confirmFixture }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    const select = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'stashPick')
+    expect('找得到贮藏选择器（确认框用例）', select !== undefined)
+    select?.handler({ target: { value: 'stash@{1}' } })
+    instance.rerender(hostProps('D:/demo'))
+
+    // 注意：重渲染会把整棵面板树换成新节点，rootRef 也跟着换了新的。
+    // 之前的 DOM 节点这时已经脱离文档，拿它当「面板」会什么都测不到。
+    const currentRoot = () => sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+    const applyButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.children) === 'stashApply')
+    expect('找得到应用按钮（确认框用例）', applyButton !== undefined)
+
+    if (currentRoot() !== undefined && applyButton !== undefined) {
+      let asked = ''
+      sandboxWindow.confirm = (message) => {
+        asked = String(message)
+        // 真实弹窗会把焦点交给系统：替身不演这一步就测不到真正的场景。
+        sandboxDom.document.activeElement = sandboxDom.body
+        return true
+      }
+      // 用挂在面板根下的子元素代表「持有焦点的那个按钮」。
+      const heldButton = sandboxDom.createElement('button', currentRoot())
+      heldButton.focus()
+      sandboxDom.document.focusLog.length = 0
+
+      applyButton.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 60))
+
+      expect('应用贮藏前先弹确认', asked.includes('stashApplyConfirm'), asked)
+      expect('确认过之后焦点没有掉在 body 上', sandboxDom.document.activeElement !== sandboxDom.body, String(sandboxDom.document.activeElement?.tag))
+      expect('确认过之后焦点还回面板（动作前的那个控件）', sandboxDom.document.activeElement === heldButton, sandboxDom.document.focusLog)
+
+      // 取消同样要还焦点：弹窗已经把焦点挪出去了，不还回去一样是「打字进不了输入框」。
+      let cancelAsked = ''
+      sandboxWindow.confirm = (message) => {
+        cancelAsked = String(message)
+        sandboxDom.document.activeElement = sandboxDom.body
+        return false
+      }
+      const postsBefore = confirmPosts.length
+      const heldButton2 = sandboxDom.createElement('button', currentRoot())
+      heldButton2.focus()
+      sandboxDom.document.focusLog.length = 0
+      const applyButton2 = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.children) === 'stashApply')
+      applyButton2?.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect('取消时也要确认一次', cancelAsked.includes('stashApplyConfirm'), cancelAsked)
+      expect('取消不发动作', confirmPosts.length === postsBefore, confirmPosts.length - postsBefore)
+      expect('取消之后焦点也没掉在 body 上', sandboxDom.document.activeElement !== sandboxDom.body, String(sandboxDom.document.activeElement?.tag))
+      expect('取消之后焦点还回面板', sandboxDom.document.activeElement === heldButton2, sandboxDom.document.focusLog)
+    }
+  } catch (error) {
+    expect('确认框焦点用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+    delete sandboxWindow.confirm
+  }
+
+  // (b9) 冲突时「报错」与「实际已生效」必须一起说清。
+  //   实测（临时仓库里贮藏一次改动、再制造一次冲突后 `git stash apply`）：
+  //   撞上冲突时退出码 1、**stderr 是空的**，CONFLICT/Auto-merging 全写在 stdout，
+  //   而带冲突标记的内容已经落进工作区（status 里是 UU / kind=conflicted）。
+  //   只按 stderr 组文案就会得出「操作没有返回信息 / 退出码 1」，用户看到报错、
+  //   文件却真的变了，只能自己猜哪句是真的——这正是「应用贮藏报错，实际已成功」。
+  const conflictBefore = {
+    ...stubbed,
+    files: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    staged: [],
+    unstaged: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    stashes: [{ ref: 'stash@{0}', message: 'On main: 会撞车的贮藏' }],
+    clean: false,
+  }
+  const conflictAfter = {
+    ...conflictBefore,
+    files: [{ path: 'conflicted.txt', x: 'UU', y: 'UU', staged: false, kind: 'conflicted' }],
+    staged: [],
+    unstaged: [{ path: 'conflicted.txt', x: 'UU', y: 'UU', staged: false, kind: 'conflicted' }],
+  }
+  let conflictStatusCalls = 0
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    if (init !== undefined && init.method === 'POST') {
+      // 实测形态：退出码 1、stderr 为空、冲突信息在 stdout、进程没被杀。
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: false,
+          code: 1,
+          message: '',
+          killed: false,
+          stdout: 'Auto-merging conflicted.txt\nCONFLICT (content): Merge conflict in conflicted.txt\nOn branch main\nUnmerged paths:\n',
+        }),
+      }
+    }
+    if (text.includes('/git/status')) {
+      conflictStatusCalls += 1
+      return { ok: true, status: 200, json: async () => (conflictStatusCalls === 1 ? conflictBefore : conflictAfter) }
+    }
+    if (text.includes('/git/diff')) return { ok: true, status: 200, json: async () => ({ file: 'a.txt', diff: '', truncated: false, error: null }) }
+    if (text.includes('/git/log')) return { ok: true, status: 200, json: async () => ({ commits: [], hasMore: false, error: null }) }
+    return { ok: true, status: 200, json: async () => ({ locals: [], remotes: [], error: null }) }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    const selectStash = handlers.find((entry) => entry.event === 'onChange' && entry.attrs['aria-label'] === 'stashPick')
+    selectStash?.handler({ target: { value: 'stash@{0}' } })
+    instance.rerender(hostProps('D:/demo'))
+    sandboxWindow.confirm = () => true
+    const applyConflictButton = handlers.find((entry) => entry.event === 'onClick' && String(entry.attrs.children) === 'stashApply')
+    expect('找得到应用按钮（冲突用例）', applyConflictButton !== undefined)
+
+    if (applyConflictButton !== undefined) {
+      applyConflictButton.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      const conflictHtml = instance.rerender(hostProps('D:/demo'))
+
+      expect('冲突不再只报「没有返回信息」', conflictHtml.includes('actionFailedNoMessage') === false, conflictHtml.slice(0, 300))
+      expect('冲突不再只报「退出码 1、没有输出」', conflictHtml.includes('actionFailedCode') === false, conflictHtml.slice(0, 300))
+      expect('冲突时明说内容已经写进工作区', conflictHtml.includes('actionConflict'), conflictHtml.slice(0, 400))
+      expect('冲突提示里点名了冲突文件', conflictHtml.includes('conflicted.txt'), conflictHtml.slice(0, 400))
+      // 冲突文件本身也要在列表里看得见（这是「实际已经生效」的证据）。
+      expect('冲突文件渲染进未暂存列表', conflictHtml.includes('dshg-k-conflicted'), conflictHtml.slice(0, 600))
+    }
+  } catch (error) {
+    expect('冲突文案用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+    delete sandboxWindow.confirm
+  }
+
+  // (b10) 操作完焦点要回到**会话输入框**：这是「储藏/丢弃做完回不到输入框、
+  //   输入框打不了字」的直接回归点。
+  //   用户的路径是「在输入框里打字 → 鼠标移到面板点一个动作按钮 → 动作做完想接着打字」。
+  //   浏览器把焦点交给被点的按钮是 mousedown 的默认行为，所以在点击回调里读
+  //   activeElement 只能读到面板里的按钮，已经太晚了 —— 必须在**指针按下**时
+  //   （`onPointerDownCapture`）把「原本在哪个输入框里」记下来，动作结束后还回去。
+  //   反过来，如果按下时焦点本来就在面板里（用户在面板里连点），就不该把焦点甩出去。
+  const focusBackFixture = {
+    ...stubbed,
+    files: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    staged: [],
+    unstaged: [{ path: 'a.txt', x: ' M', y: 'M', staged: false, kind: 'modified' }],
+    stashes: [],
+    clean: false,
+  }
+  globalThis.fetch = async (url, init) => {
+    const text = String(url)
+    requested.push(text)
+    let payload = {}
+    if (text.includes('/git/status')) payload = focusBackFixture
+    else if (text.includes('/git/diff')) payload = { file: 'a.txt', diff: '', truncated: false, error: null }
+    else if (text.includes('/git/log')) payload = { commits: [], hasMore: false, error: null }
+    else if (text.includes('/git/branches')) payload = { locals: [], remotes: [], error: null }
+    else payload = { ok: true, status: focusBackFixture }
+    return { ok: true, status: 200, json: async () => payload }
+  }
+  try {
+    const instance = mount(body.component, hostProps('D:/demo'))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    instance.rerender(hostProps('D:/demo'))
+
+    // 面板根容器上的「指针按下」钩子，就是用来记「原本焦点在哪」的。
+    const pointerHandler = handlers.find((entry) => entry.event === 'onPointerDownCapture')
+    expect('面板根容器上挂了指针按下的焦点记录钩子', pointerHandler !== undefined, handlers.map((entry) => entry.event))
+
+    const rootNow = () => sandboxDom.body.children.find((item) => String(item.tag) === 'div')
+    const discardButton = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'discard')
+    expect('找得到丢弃按钮（还焦点用例）', discardButton !== undefined)
+
+    if (pointerHandler !== undefined && discardButton !== undefined && rootNow() !== undefined) {
+      // 场景一：在输入框里打字 → 点面板上的丢弃 → 做完焦点要回到那个输入框。
+      const composer = sandboxDom.createElement('textarea', sandboxDom.body)
+      composer.focus()
+      pointerHandler.handler({}) // 指针按在面板上：此刻焦点还在输入框里，记下来
+      const clicked = sandboxDom.createElement('button', rootNow())
+      clicked.focus() // mousedown 之后浏览器把焦点交给了被点的按钮
+      sandboxWindow.confirm = () => {
+        // 原生确认框把焦点交给系统：演出来。
+        sandboxDom.document.activeElement = sandboxDom.body
+        return true
+      }
+      sandboxDom.document.focusLog.length = 0
+      discardButton.handler({})
+      // 丢弃成功后那一行会被卸载，按钮随之消失（用户报的正是这种「控件没了」的情况）。
+      markDisconnected(clicked)
+      await new Promise((resolve) => setTimeout(resolve, 60))
+
+      expect('丢弃做完焦点回到了会话输入框', sandboxDom.document.activeElement === composer, String(sandboxDom.document.activeElement?.tag))
+      expect('确实对输入框调用过 focus()', sandboxDom.document.focusLog.includes('textarea'), sandboxDom.document.focusLog)
+      expect('焦点没有停在面板里', rootNow() === undefined || sandboxDom.document.activeElement !== rootNow())
+
+      // 场景二：按下时焦点本来就在面板里（用户在面板里连点）⇒ 不要甩回输入框。
+      const composer2 = sandboxDom.createElement('textarea', sandboxDom.body)
+      composer2.focus()
+      const insideButton = sandboxDom.createElement('button', rootNow())
+      insideButton.focus()
+      pointerHandler.handler({}) // 此刻焦点在面板里 ⇒ 记 null
+      const discardButton2 = handlers.find((entry) => entry.event === 'onClick' && entry.attrs.title === 'discard')
+      sandboxWindow.confirm = () => {
+        sandboxDom.document.activeElement = sandboxDom.body
+        return true
+      }
+      sandboxDom.document.focusLog.length = 0
+      discardButton2?.handler({})
+      await new Promise((resolve) => setTimeout(resolve, 60))
+
+      expect('面板里连点时不把焦点甩回输入框', sandboxDom.document.activeElement !== composer2, String(sandboxDom.document.activeElement?.tag))
+      expect('面板里连点时就近还给面板内的控件', sandboxDom.document.activeElement === insideButton, sandboxDom.document.focusLog)
+    }
+  } catch (error) {
+    expect('还焦点到输入框用例不报错', false, error.message)
+  } finally {
+    globalThis.fetch = originalFetch
+    delete sandboxWindow.confirm
   }
 
   // (c) 标题槽位：渲染出名字，且不依赖任何 props.view。
@@ -1291,6 +1789,22 @@ group('贮藏：应用保留、恢复删除、显式选条')
     expect('删除指定贮藏成功', dropped.ok === true, dropped.stderr)
     status = await internals.buildStatus(dir)
     expect('删除后贮藏清空', status.stashes.length === 0, status.stashes)
+
+    // --- killed 契约：页面靠它把「被超时打断」与「git 报错」区分开 ---
+    // 真的等一次 120s 超时不现实，所以这里直接喂装配结果，钉住字段会被传递。
+    // 之所以要单独测：单条命令的结果来自 git()，本身就带 killed；
+    // 而 discard / discard-all 是 mergeGitResults 拼出来的，稍不留神就会把这个字段丢在合并里。
+    const mergedKilled = internals.mergeGitResults([
+      { ok: true, code: 0, stdout: '', stderr: '', killed: false },
+      { ok: false, code: 1, stdout: '', stderr: '', killed: true },
+    ])
+    expect('合并结果保留 killed（任一步被打断即算打断）', mergedKilled.killed === true, mergedKilled)
+    const mergedClean = internals.mergeGitResults([
+      { ok: true, code: 0, stdout: 'a', stderr: '', killed: false },
+      { ok: true, code: 0, stdout: 'b', stderr: '', killed: false },
+    ])
+    expect('全都没被打断时 killed 为 false', mergedClean.killed === false, mergedClean)
+    expect('真实 git 失败带着 killed=false（不是超时）', dropped.killed === false, dropped.killed)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

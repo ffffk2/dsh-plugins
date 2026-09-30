@@ -1,5 +1,6 @@
 {
   "name": "@local/dsh-git",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Right-sidebar Git tab: inspect changes, stage, diff, commit, browse history, and manage branches and remotes.",
