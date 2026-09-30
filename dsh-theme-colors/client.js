@@ -1,7 +1,7 @@
 /**
  * 外观颜色 —— Client 半。
  *
- * 在设置面板里注册一个 `settings.section` 页面：用取色器自由调整深色模式的
+ * 在设置面板里注册一个 `settings.section` 页面：用取色器自由调整**深色与浅色两套**
  * 关键配色 token（主背景 / 侧栏 / 卡片 / 文字 / 强调色 / 分隔线）。
  *
  * 生效方式：调用官方主题服务 `ctx.theme.overrideTokens(source, tokens)`
@@ -9,10 +9,12 @@
  * ui-layout 会把快照里的 token 直接 setProperty 到 body 上，
  * 所以改动是立即生效的，不需要重启。
  *
+ * 一层覆盖同时管住两套配色：每个 token 带 `{ light, dark }` 一对值，
+ * 快照按当前主题的 `colorScheme` 取用对应那一侧，因此两套可以各自调整、互不串色；
+ * 没被动过的一侧始终带回官方原值（等于官方配色）。
+ *
  * 持久化：localStorage。DSH Desktop 固定监听 127.0.0.1:19387，
  * origin 稳定，因此跨重启有效；localStorage 不可用时退化为进程内。
- *
- * 浅色模式不受影响：只覆盖 dark 一侧，light 一侧固定传官方原值。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-theme-colors',
@@ -27,43 +29,43 @@ window.__ModuleLoader__.load({
 
     /**
      * 关键 token 目录。
-     * - `dark`  官方深色原值（也是“重置”的目标值）
-     * - `light` 官方浅色原值，覆盖层里原样带过去，浅色模式保持官方配色
+     * - `dark` / `light`：官方原值，既是取色器的起点，也是「重置」的目标值
+     * - 文案一律走 locale 字典（`labelKey` / `descKey`），中英文案都只写在字典里
      */
     const GROUPS = [
       {
         id: 'surface',
-        title: '背景与表面',
+        titleKey: 'groupSurface',
         items: [
-          { token: '--dsw-alias-bg-base', label: '主背景', desc: '整个应用的底层画布', dark: '#151517', light: '#ffffff' },
-          { token: '--dsw-specific-sidebar-fill', label: '侧边栏', desc: '左侧栏与窗口标题栏底色', dark: '#1b1b1c', light: '#f9fafb' },
-          { token: '--dsw-alias-bg-layer-1', label: '一级表面', desc: '从画布浮起的第一层容器', dark: '#232324', light: '#ffffff' },
-          { token: '--dsw-alias-bg-layer-2', label: '二级表面', desc: '卡片、模块与嵌套容器', dark: '#2c2c2e', light: '#ffffff' },
-          { token: '--dsw-alias-bg-overlay', label: '浮层底色', desc: '弹窗、下拉与浮出面板', dark: '#43454a', light: '#e9ecf2' },
+          { token: '--dsw-alias-bg-base', labelKey: 'labelBgBase', descKey: 'descBgBase', dark: '#151517', light: '#ffffff' },
+          { token: '--dsw-specific-sidebar-fill', labelKey: 'labelSidebar', descKey: 'descSidebar', dark: '#1b1b1c', light: '#f9fafb' },
+          { token: '--dsw-alias-bg-layer-1', labelKey: 'labelLayer1', descKey: 'descLayer1', dark: '#232324', light: '#ffffff' },
+          { token: '--dsw-alias-bg-layer-2', labelKey: 'labelLayer2', descKey: 'descLayer2', dark: '#2c2c2e', light: '#ffffff' },
+          { token: '--dsw-alias-bg-overlay', labelKey: 'labelOverlay', descKey: 'descOverlay', dark: '#43454a', light: '#e9ecf2' },
         ],
       },
       {
         id: 'text',
-        title: '文字',
+        titleKey: 'groupText',
         items: [
-          { token: '--dsw-alias-label-primary', label: '正文', desc: '主要文本与标题', dark: '#f9fafb', light: '#0f1115' },
-          { token: '--dsw-alias-label-secondary', label: '次要文字', desc: '说明、时间戳与辅助信息', dark: '#cfd3d6', light: '#61666b' },
+          { token: '--dsw-alias-label-primary', labelKey: 'labelPrimary', descKey: 'descPrimary', dark: '#f9fafb', light: '#0f1115' },
+          { token: '--dsw-alias-label-secondary', labelKey: 'labelSecondary', descKey: 'descSecondary', dark: '#cfd3d6', light: '#61666b' },
         ],
       },
       {
         id: 'accent',
-        title: '强调色',
+        titleKey: 'groupAccent',
         items: [
-          { token: '--dsw-alias-brand-primary', label: '品牌强调', desc: '主按钮填充、选中态与品牌标识', dark: '#f9fafb', light: '#0f1115' },
-          { token: '--dsw-alias-state-business-primary', label: '链接与焦点', desc: '链接文字、焦点环与业务高亮', dark: '#7aaaff', light: '#4176e6' },
+          { token: '--dsw-alias-brand-primary', labelKey: 'labelBrand', descKey: 'descBrand', dark: '#f9fafb', light: '#0f1115' },
+          { token: '--dsw-alias-state-business-primary', labelKey: 'labelBusiness', descKey: 'descBusiness', dark: '#7aaaff', light: '#4176e6' },
         ],
       },
       {
         id: 'line',
-        title: '分隔线',
+        titleKey: 'groupLine',
         items: [
-          { token: '--dsw-alias-border-l1', label: '细边框', desc: '列表与卡片的分隔线，可用 8 位十六进制带透明度', dark: '#ffffff0f', light: '#0000000a' },
-          { token: '--dsw-alias-border-l2', label: '粗边框', desc: '对比更强的描边，可用 8 位十六进制带透明度', dark: '#ffffff1f', light: '#0000001a' },
+          { token: '--dsw-alias-border-l1', labelKey: 'labelBorderL1', descKey: 'descBorderL1', dark: '#ffffff0f', light: '#0000000a' },
+          { token: '--dsw-alias-border-l2', labelKey: 'labelBorderL2', descKey: 'descBorderL2', dark: '#ffffff1f', light: '#0000001a' },
         ],
       },
     ]
@@ -72,19 +74,22 @@ window.__ModuleLoader__.load({
     const BY_TOKEN = new Map(ITEMS.map((item) => [item.token, item]))
 
     /**
-     * 预设配色。只给深色一侧（浅色模式继续用官方原值），每套都覆盖全部 11 个 token，
-     * 所以点一下就是完整一套、不会残留上一套的颜色。
+     * 预设配色。每套只覆盖 `mode` 那一种配色的全部 11 个 token，
+     * 所以点一下就是完整一套、不会残留上一套的颜色，另一种配色完全不受影响。
      *
-     * 全部按 WCAG 相对亮度体检过（断言在 smoke.mjs 里）：
-     *   正文/底 7.4–11.4、次要文字/底 ≥ 4.7、链接/底 5.2–7.8、正文/卡片 ≥ 5.6、
-     *   品牌色/按钮反色字 ≥ 10.9 —— 既不刺眼，也不至于看不清。
-     * 前两套自研，其余取自公认的低对比护眼配色。
+     * 全部按 WCAG 相对亮度体检过（断言在 smoke.mjs 里）。
+     * 深色侧：正文/底 7.4–11.4、次要文字/底 ≥ 4.7、链接/底 5.2–7.8、
+     * 正文/卡片 ≥ 5.6、品牌色/按钮反色字 ≥ 10.9 —— 够读但不刺白。
+     * 浅色侧：底色不用纯白（亮度 ≤ 0.92，官方浅色是 18.9 的硬对比，这里压到 7–13）、
+     * 次要文字/底 ≥ 4.5、链接/底 4.5–9、正文/卡片 ≥ 5、品牌色/白 ≥ 4.5。
+     * 自研的排在前面，其余取自公认的低对比护眼配色。
      */
     const PRESETS = [
       {
         id: 'warm-gray',
-        name: '暖灰护眼',
-        note: '自研 · 中性偏暖、零蓝光刺激，深夜最耐看',
+        mode: 'dark',
+        nameKey: 'pWarmGray',
+        noteKey: 'pWarmGrayNote',
         tokens: {
           '--dsw-alias-bg-base': '#1e1c1a',
           '--dsw-specific-sidebar-fill': '#252220',
@@ -101,8 +106,9 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'night-navy',
-        name: '深蓝夜',
-        note: '自研 · 低饱和深夜蓝，正文不刺白',
+        mode: 'dark',
+        nameKey: 'pNightNavy',
+        noteKey: 'pNightNavyNote',
         tokens: {
           '--dsw-alias-bg-base': '#131820',
           '--dsw-specific-sidebar-fill': '#171d26',
@@ -119,8 +125,9 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'everforest',
-        name: '常青 Everforest',
-        note: '低对比绿灰，公认久看不累',
+        mode: 'dark',
+        nameKey: 'pEverforest',
+        noteKey: 'pEverforestNote',
         tokens: {
           '--dsw-alias-bg-base': '#2d353b',
           '--dsw-specific-sidebar-fill': '#232a2e',
@@ -137,8 +144,9 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'gruvbox',
-        name: '格鲁布 Gruvbox',
-        note: '暖色低对比经典，纸质暖调',
+        mode: 'dark',
+        nameKey: 'pGruvbox',
+        noteKey: 'pGruvboxNote',
         tokens: {
           '--dsw-alias-bg-base': '#2b2927',
           '--dsw-specific-sidebar-fill': '#232120',
@@ -155,8 +163,9 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'nord',
-        name: '北境 Nord',
-        note: '冷灰蓝，极简低饱和',
+        mode: 'dark',
+        nameKey: 'pNord',
+        noteKey: 'pNordNote',
         tokens: {
           '--dsw-alias-bg-base': '#2e3440',
           '--dsw-specific-sidebar-fill': '#292e39',
@@ -173,8 +182,9 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'solarized',
-        name: '日光 Solarized',
-        note: '经典青灰底，刻意压低对比',
+        mode: 'dark',
+        nameKey: 'pSolarized',
+        noteKey: 'pSolarizedNote',
         tokens: {
           '--dsw-alias-bg-base': '#002b36',
           '--dsw-specific-sidebar-fill': '#00252e',
@@ -191,8 +201,9 @@ window.__ModuleLoader__.load({
       },
       {
         id: 'catppuccin',
-        name: '摩卡 Catppuccin',
-        note: '柔和粉紫，柔光感',
+        mode: 'dark',
+        nameKey: 'pCatppuccin',
+        noteKey: 'pCatppuccinNote',
         tokens: {
           '--dsw-alias-bg-base': '#1e1e2e',
           '--dsw-specific-sidebar-fill': '#181825',
@@ -205,6 +216,158 @@ window.__ModuleLoader__.load({
           '--dsw-alias-state-business-primary': '#89b4fa',
           '--dsw-alias-border-l1': '#ffffff14',
           '--dsw-alias-border-l2': '#ffffff22',
+        },
+      },
+      {
+        id: 'bean-green',
+        mode: 'light',
+        nameKey: 'pBeanGreen',
+        noteKey: 'pBeanGreenNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#c7e5cd',
+          '--dsw-specific-sidebar-fill': '#bcddc3',
+          '--dsw-alias-bg-layer-1': '#cfe9d4',
+          '--dsw-alias-bg-layer-2': '#dbf0df',
+          '--dsw-alias-bg-overlay': '#b0d5b8',
+          '--dsw-alias-label-primary': '#24382a',
+          '--dsw-alias-label-secondary': '#4b6152',
+          '--dsw-alias-brand-primary': '#1d2f23',
+          '--dsw-alias-state-business-primary': '#1c6a4a',
+          '--dsw-alias-border-l1': '#00000014',
+          '--dsw-alias-border-l2': '#00000026',
+        },
+      },
+      {
+        id: 'paper',
+        mode: 'light',
+        nameKey: 'pPaper',
+        noteKey: 'pPaperNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#f4edde',
+          '--dsw-specific-sidebar-fill': '#ebe3d1',
+          '--dsw-alias-bg-layer-1': '#f8f3e8',
+          '--dsw-alias-bg-layer-2': '#fdfaf2',
+          '--dsw-alias-bg-overlay': '#e2d8c0',
+          '--dsw-alias-label-primary': '#3a352b',
+          '--dsw-alias-label-secondary': '#6b6355',
+          '--dsw-alias-brand-primary': '#2f2b22',
+          '--dsw-alias-state-business-primary': '#2a6191',
+          '--dsw-alias-border-l1': '#00000012',
+          '--dsw-alias-border-l2': '#00000024',
+        },
+      },
+      {
+        id: 'mist',
+        mode: 'light',
+        nameKey: 'pMist',
+        noteKey: 'pMistNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#eef1f4',
+          '--dsw-specific-sidebar-fill': '#e5eaf0',
+          '--dsw-alias-bg-layer-1': '#f4f7fa',
+          '--dsw-alias-bg-layer-2': '#fbfdfe',
+          '--dsw-alias-bg-overlay': '#dce2ea',
+          '--dsw-alias-label-primary': '#2b333d',
+          '--dsw-alias-label-secondary': '#5c6673',
+          '--dsw-alias-brand-primary': '#222a33',
+          '--dsw-alias-state-business-primary': '#2c6ba8',
+          '--dsw-alias-border-l1': '#00000012',
+          '--dsw-alias-border-l2': '#00000024',
+        },
+      },
+      {
+        id: 'everforest-light',
+        mode: 'light',
+        nameKey: 'pEverforestLight',
+        noteKey: 'pEverforestLightNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#f8f1dc',
+          '--dsw-specific-sidebar-fill': '#efe9d2',
+          '--dsw-alias-bg-layer-1': '#fbf6e8',
+          '--dsw-alias-bg-layer-2': '#fffdf6',
+          '--dsw-alias-bg-overlay': '#e8e2c9',
+          '--dsw-alias-label-primary': '#46535a',
+          '--dsw-alias-label-secondary': '#646d5e',
+          '--dsw-alias-brand-primary': '#37423f',
+          '--dsw-alias-state-business-primary': '#2c6d94',
+          '--dsw-alias-border-l1': '#00000012',
+          '--dsw-alias-border-l2': '#00000024',
+        },
+      },
+      {
+        id: 'gruvbox-light',
+        mode: 'light',
+        nameKey: 'pGruvboxLight',
+        noteKey: 'pGruvboxLightNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#fbf1c7',
+          '--dsw-specific-sidebar-fill': '#f2e5bc',
+          '--dsw-alias-bg-layer-1': '#f9f5d7',
+          '--dsw-alias-bg-layer-2': '#fffbe6',
+          '--dsw-alias-bg-overlay': '#ebdbb2',
+          '--dsw-alias-label-primary': '#3c3836',
+          '--dsw-alias-label-secondary': '#665c54',
+          '--dsw-alias-brand-primary': '#32302f',
+          '--dsw-alias-state-business-primary': '#076678',
+          '--dsw-alias-border-l1': '#00000014',
+          '--dsw-alias-border-l2': '#00000026',
+        },
+      },
+      {
+        id: 'nord-light',
+        mode: 'light',
+        nameKey: 'pNordLight',
+        noteKey: 'pNordLightNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#eceff4',
+          '--dsw-specific-sidebar-fill': '#e5e9f0',
+          '--dsw-alias-bg-layer-1': '#f2f4f8',
+          '--dsw-alias-bg-layer-2': '#fafbfc',
+          '--dsw-alias-bg-overlay': '#d8dee9',
+          '--dsw-alias-label-primary': '#2e3440',
+          '--dsw-alias-label-secondary': '#4c566a',
+          '--dsw-alias-brand-primary': '#2e3440',
+          '--dsw-alias-state-business-primary': '#43608a',
+          '--dsw-alias-border-l1': '#00000012',
+          '--dsw-alias-border-l2': '#00000024',
+        },
+      },
+      {
+        id: 'solarized-light',
+        mode: 'light',
+        nameKey: 'pSolarizedLight',
+        noteKey: 'pSolarizedLightNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#f7efda',
+          '--dsw-specific-sidebar-fill': '#efe7d2',
+          '--dsw-alias-bg-layer-1': '#faf4e4',
+          '--dsw-alias-bg-layer-2': '#fffdf6',
+          '--dsw-alias-bg-overlay': '#e9e2cb',
+          '--dsw-alias-label-primary': '#3d4e55',
+          '--dsw-alias-label-secondary': '#5d6f74',
+          '--dsw-alias-brand-primary': '#37474d',
+          '--dsw-alias-state-business-primary': '#1f6f9f',
+          '--dsw-alias-border-l1': '#00000012',
+          '--dsw-alias-border-l2': '#00000024',
+        },
+      },
+      {
+        id: 'latte',
+        mode: 'light',
+        nameKey: 'pLatte',
+        noteKey: 'pLatteNote',
+        tokens: {
+          '--dsw-alias-bg-base': '#eff1f5',
+          '--dsw-specific-sidebar-fill': '#e6e9ef',
+          '--dsw-alias-bg-layer-1': '#e9ecf2',
+          '--dsw-alias-bg-layer-2': '#fbfcfd',
+          '--dsw-alias-bg-overlay': '#dce0e8',
+          '--dsw-alias-label-primary': '#4c4f69',
+          '--dsw-alias-label-secondary': '#63667c',
+          '--dsw-alias-brand-primary': '#3c3f57',
+          '--dsw-alias-state-business-primary': '#1b60d8',
+          '--dsw-alias-border-l1': '#00000012',
+          '--dsw-alias-border-l2': '#00000024',
         },
       },
     ]
@@ -224,8 +387,8 @@ window.__ModuleLoader__.load({
 
     const zh = {
       nav: '外观颜色',
-      title: '深色模式配色',
-      intro: '用取色器调整下面的颜色，改动立刻作用到整个界面。只影响深色模式，切到浅色仍是官方配色。',
+      title: '界面配色',
+      intro: '深色、浅色两套都能改：先在上面选要编辑的模式，再点一套预设或逐行取色；没动过的那一套继续用官方配色。',
       enabled: '启用自定义配色',
       changed: '项已改',
       defaultBadge: '官方默认',
@@ -233,16 +396,76 @@ window.__ModuleLoader__.load({
       reset: '重置',
       picker: '取色',
       value: '颜色值',
+      modeLabel: '编辑',
+      modeHint: '切换要编辑的配色：深色与浅色各存各的，互不影响',
+      modeDark: '深色',
+      modeLight: '浅色',
       presets: '预设配色',
-      presetsHint: '点一套直接套用，之后还能按下面的取色器逐行微调。都只改深色模式。',
+      presetsHint: '点一下整套生效，只覆盖当前模式的 11 个 token，另一种模式不受影响；之后还能逐行微调。',
       noTheme: '没有检测到主题服务（ui-theme），配色无法应用。',
       rerun: '改完不用重启，设置页本身就会跟着变。',
+      groupSurface: '背景与表面',
+      groupText: '文字',
+      groupAccent: '强调色',
+      groupLine: '分隔线',
+      labelBgBase: '主背景',
+      descBgBase: '整个应用的底层画布',
+      labelSidebar: '侧边栏',
+      descSidebar: '左侧栏与窗口标题栏底色',
+      labelLayer1: '一级表面',
+      descLayer1: '从画布浮起的第一层容器',
+      labelLayer2: '二级表面',
+      descLayer2: '卡片、模块与嵌套容器',
+      labelOverlay: '浮层底色',
+      descOverlay: '弹窗、下拉与浮出面板',
+      labelPrimary: '正文',
+      descPrimary: '主要文本与标题',
+      labelSecondary: '次要文字',
+      descSecondary: '说明、时间戳与辅助信息',
+      labelBrand: '品牌强调',
+      descBrand: '主按钮填充、选中态与品牌标识',
+      labelBusiness: '链接与焦点',
+      descBusiness: '链接文字、焦点环与业务高亮',
+      labelBorderL1: '细边框',
+      descBorderL1: '列表与卡片的分隔线，可用 8 位十六进制带透明度',
+      labelBorderL2: '粗边框',
+      descBorderL2: '对比更强的描边，可用 8 位十六进制带透明度',
+      pWarmGray: '暖灰护眼',
+      pWarmGrayNote: '自研 · 中性偏暖、零蓝光刺激，深夜最耐看',
+      pNightNavy: '深蓝夜',
+      pNightNavyNote: '自研 · 低饱和深夜蓝，正文不刺白',
+      pEverforest: '常青 Everforest',
+      pEverforestNote: '低对比绿灰，公认久看不累',
+      pGruvbox: '格鲁布 Gruvbox',
+      pGruvboxNote: '暖色低对比经典，纸质暖调',
+      pNord: '北境 Nord',
+      pNordNote: '冷灰蓝，极简低饱和',
+      pSolarized: '日光 Solarized',
+      pSolarizedNote: '经典青灰底，刻意压低对比',
+      pCatppuccin: '摩卡 Catppuccin',
+      pCatppuccinNote: '柔和粉紫，柔光感',
+      pBeanGreen: '豆沙绿',
+      pBeanGreenNote: '经典护眼绿底，久看最舒服',
+      pPaper: '米白护眼',
+      pPaperNote: '自研 · 米白暖调，比纯白柔和',
+      pMist: '雾青',
+      pMistNote: '自研 · 冷调雾青，清爽不刺眼',
+      pEverforestLight: '常青 Everforest Light',
+      pEverforestLightNote: 'Everforest 浅色，米绿低对比',
+      pGruvboxLight: '格鲁布 Gruvbox Light',
+      pGruvboxLightNote: 'Gruvbox 浅色，牛皮纸暖黄',
+      pNordLight: '北境 Nord Light',
+      pNordLightNote: 'Nord 浅色，冷雪灰蓝',
+      pSolarizedLight: '日光 Solarized Light',
+      pSolarizedLightNote: 'Solarized 浅色，米黄为底',
+      pLatte: '摩卡 Catppuccin Latte',
+      pLatteNote: 'Catppuccin 浅色，柔和奶咖',
     }
 
     const en = {
       nav: 'Appearance colors',
-      title: 'Dark palette colors',
-      intro: 'Pick colors below; changes apply to the whole UI instantly. Only the dark palette is affected — light mode keeps the official colors.',
+      title: 'Interface colors',
+      intro: 'Both palettes are editable: switch the mode above, then pick a preset or fine-tune row by row. A palette you leave alone keeps the official colors.',
       enabled: 'Enable custom colors',
       changed: 'changed',
       defaultBadge: 'Official default',
@@ -250,10 +473,70 @@ window.__ModuleLoader__.load({
       reset: 'Reset',
       picker: 'Color picker',
       value: 'Color value',
+      modeLabel: 'Editing',
+      modeHint: 'Switch which palette you are editing; each side is stored separately',
+      modeDark: 'Dark',
+      modeLight: 'Light',
       presets: 'Preset palettes',
-      presetsHint: 'Pick a palette, then fine-tune any row below. Dark mode only.',
+      presetsHint: 'One click fills all 11 tokens of the current mode and leaves the other mode untouched; fine-tune any row afterwards.',
       noTheme: 'The theme service (ui-theme) is missing, so colors cannot be applied.',
       rerun: 'No restart needed — this page repaints as you pick.',
+      groupSurface: 'Background & surfaces',
+      groupText: 'Text',
+      groupAccent: 'Accent',
+      groupLine: 'Dividers',
+      labelBgBase: 'Canvas',
+      descBgBase: 'Base background behind the whole app',
+      labelSidebar: 'Sidebar',
+      descSidebar: 'Left rail and window title bar',
+      labelLayer1: 'Surface 1',
+      descLayer1: 'First level raised above the canvas',
+      labelLayer2: 'Surface 2',
+      descLayer2: 'Cards, modules and nested containers',
+      labelOverlay: 'Overlay',
+      descOverlay: 'Dialogs, dropdowns and popovers',
+      labelPrimary: 'Body text',
+      descPrimary: 'Primary text and headings',
+      labelSecondary: 'Secondary text',
+      descSecondary: 'Captions, timestamps and hints',
+      labelBrand: 'Brand accent',
+      descBrand: 'Primary button fill, selected state and brand marks',
+      labelBusiness: 'Links & focus',
+      descBusiness: 'Link text, focus ring and business highlights',
+      labelBorderL1: 'Hairline border',
+      descBorderL1: 'List and card dividers; 8-digit hex carries alpha',
+      labelBorderL2: 'Strong border',
+      descBorderL2: 'Higher-contrast outline; 8-digit hex carries alpha',
+      pWarmGray: 'Warm gray',
+      pWarmGrayNote: 'Built-in · neutral warm, no blue glare, easiest at night',
+      pNightNavy: 'Night navy',
+      pNightNavyNote: 'Built-in · low-saturation midnight blue, no harsh white text',
+      pEverforest: 'Everforest',
+      pEverforestNote: 'Low-contrast green gray, famously easy on the eyes',
+      pGruvbox: 'Gruvbox',
+      pGruvboxNote: 'Warm low-contrast classic, paper-like warmth',
+      pNord: 'Nord',
+      pNordNote: 'Cool gray blue, minimal and desaturated',
+      pSolarized: 'Solarized',
+      pSolarizedNote: 'Classic teal-gray base, deliberately low contrast',
+      pCatppuccin: 'Catppuccin',
+      pCatppuccinNote: 'Soft pink purple, gentle glow',
+      pBeanGreen: 'Bean green',
+      pBeanGreenNote: 'The classic Chinese eye-care green base',
+      pPaper: 'Warm paper',
+      pPaperNote: 'Built-in · warm off-white, softer than pure white',
+      pMist: 'Mist gray',
+      pMistNote: 'Built-in · cool misty gray, crisp without glare',
+      pEverforestLight: 'Everforest Light',
+      pEverforestLightNote: 'Everforest light, low-contrast cream green',
+      pGruvboxLight: 'Gruvbox Light',
+      pGruvboxLightNote: 'Gruvbox light, kraft-paper warm yellow',
+      pNordLight: 'Nord Light',
+      pNordLightNote: 'Nord light, snow gray blue',
+      pSolarizedLight: 'Solarized Light',
+      pSolarizedLightNote: 'Solarized light on a cream base',
+      pLatte: 'Catppuccin Latte',
+      pLatteNote: 'Catppuccin light, soft milk coffee',
     }
 
     /** 翻译函数由 apply 绑定；组件渲染时读取。 */
@@ -280,6 +563,13 @@ window.__ModuleLoader__.load({
 
 .dshtc-switch { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--dsw-alias-label-primary); cursor:pointer; user-select:none; }
 .dshtc-switch input { width:14px; height:14px; margin:0; accent-color:var(--dsw-alias-state-business-primary); cursor:pointer; }
+
+.dshtc-modes { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.dshtc-modesLabel { font-size:12px; color:var(--dsw-alias-label-secondary); margin-right:2px; }
+.dshtc-mode { display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 12px; border-radius:8px; border:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-base); color:var(--dsw-alias-label-secondary); font:inherit; font-size:12px; cursor:pointer; transition:color .15s, border-color .15s; }
+.dshtc-mode:hover { border-color:var(--dsw-alias-border-l2); }
+.dshtc-mode.is-on { border-color:var(--dsw-alias-state-business-primary); color:var(--dsw-alias-label-primary); }
+.dshtc-modeCount { font-size:10px; line-height:14px; min-width:14px; padding:0 4px; border-radius:7px; text-align:center; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-2); }
 
 .dshtc-card { border:1px solid var(--dsw-alias-border-l1); border-radius:12px; background:var(--dsw-alias-bg-layer-2); padding:4px 14px 10px; }
 .dshtc-cardTitle { margin:10px 0 2px; font-size:12px; font-weight:600; color:var(--dsw-alias-label-primary); }
@@ -311,21 +601,25 @@ window.__ModuleLoader__.load({
 .dshtc-hex.is-bad { border-color:var(--dsw-alias-state-error-primary); }
 `
 
-    // ---- 状态：{ enabled, dark: { token: value } } ----
+    // ---- 状态：{ enabled, dark: { token: value }, light: { token: value } } ----
 
-    function sanitizeDark(value) {
-      const dark = {}
-      if (value === null || typeof value !== 'object') return dark
+    /** 两种配色模式；顺序也是界面上 tab 的顺序。 */
+    const MODES = ['dark', 'light']
+
+    /** 清洗某一侧的取色表：不认识的 token、不合法的颜色一律丢掉。 */
+    function sanitizeColors(value) {
+      const colors = {}
+      if (value === null || typeof value !== 'object') return colors
       for (const [token, color] of Object.entries(value)) {
         if (!BY_TOKEN.has(token)) continue
         if (typeof color !== 'string' || !COLOR_PATTERN.test(color.trim())) continue
-        dark[token] = color.trim()
+        colors[token] = color.trim()
       }
-      return dark
+      return colors
     }
 
     function defaultState() {
-      return { enabled: true, dark: {} }
+      return { enabled: true, dark: {}, light: {} }
     }
 
     function loadState() {
@@ -334,7 +628,12 @@ window.__ModuleLoader__.load({
         if (raw === null || raw === '') return defaultState()
         const parsed = JSON.parse(raw)
         if (parsed === null || typeof parsed !== 'object') return defaultState()
-        return { enabled: parsed.enabled !== false, dark: sanitizeDark(parsed.dark) }
+        // 旧版本只存了 dark，没有 light —— 缺的那侧按“没改过”处理，老数据照常能用。
+        return {
+          enabled: parsed.enabled !== false,
+          dark: sanitizeColors(parsed.dark),
+          light: sanitizeColors(parsed.light),
+        }
       } catch {
         return defaultState()
       }
@@ -363,16 +662,26 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 把当前配色折成 token 覆盖层，交给主题服务。 */
+    /** 某一侧某个 token 的当前值：用户没改过就是官方原值。 */
+    function pickColor(mode, item) {
+      const value = state[mode][item.token]
+      if (typeof value !== 'string' || value === '') return item[mode].toLowerCase()
+      return value
+    }
+
+    /**
+     * 把两套配色折成同一层 token 覆盖，交给主题服务。
+     * 两侧都没被动过的 token 不进层：少写几个属性，也少一次主题广播。
+     */
     function applyOverrides() {
       if (theme === null || typeof theme.overrideTokens !== 'function') return
       const tokens = {}
       if (state.enabled) {
         for (const item of ITEMS) {
-          const value = state.dark[item.token]
-          if (typeof value !== 'string' || value === '') continue
-          if (value.toLowerCase() === item.dark.toLowerCase()) continue
-          tokens[item.token] = { light: item.light, dark: value }
+          const dark = pickColor('dark', item)
+          const light = pickColor('light', item)
+          if (dark === item.dark.toLowerCase() && light === item.light.toLowerCase()) continue
+          tokens[item.token] = { light, dark }
         }
       }
       if (disposeLayer !== null) {
@@ -409,44 +718,83 @@ window.__ModuleLoader__.load({
       commit()
     }
 
-    function setColor(token, color) {
+    function setColor(mode, token, color) {
+      if (!MODES.includes(mode)) return
       if (!BY_TOKEN.has(token)) return
       if (typeof color !== 'string') return
       const value = color.trim()
       if (!COLOR_PATTERN.test(value)) return
-      state = { ...state, enabled: true, dark: { ...state.dark, [token]: value } }
+      state = { ...state, enabled: true, [mode]: { ...state[mode], [token]: value } }
       commit()
     }
 
-    function resetColor(token) {
+    function resetColor(mode, token) {
+      if (!MODES.includes(mode)) return
       if (!BY_TOKEN.has(token)) return
-      const dark = { ...state.dark }
-      delete dark[token]
-      state = { ...state, dark }
+      const colors = { ...state[mode] }
+      delete colors[token]
+      state = { ...state, [mode]: colors }
       commit()
     }
 
     function resetAll() {
-      state = { ...state, dark: {} }
+      state = { ...state, dark: {}, light: {} }
       commit()
     }
 
-    /** 套用预设：整份替换（点一下就是完整一套），并自动打开总开关。 */
+    /** 套用预设：整份替换指定的一侧（点一下就是完整一套），并自动打开总开关。 */
     function applyPreset(id) {
       const preset = PRESETS.find((item) => item.id === id)
       if (preset === undefined) return
-      state = { ...state, enabled: true, dark: { ...preset.tokens } }
+      state = { ...state, enabled: true, [preset.mode]: { ...preset.tokens } }
       commit()
     }
 
-    /** 当前配色与某套预设完全一致时返回它的 id，否则 null。 */
-    function activePresetId() {
-      const current = signatureOf(state.dark)
+    /** 该模式当前与某套预设完全一致时返回它的 id，否则 null。 */
+    function activePresetId(mode) {
+      const current = signatureOf(state[mode])
       if (current === '') return null
       for (const preset of PRESETS) {
+        if (preset.mode !== mode) continue
         if (PRESET_SIGNATURES.get(preset.id) === current) return preset.id
       }
       return null
+    }
+
+    // ---- 设置页在编辑哪一套 ----
+
+    /** 当前生效的配色方案（'dark' / 'light'）：主题快照优先，退回 body 上的标记。 */
+    function activeMode() {
+      if (theme !== null && typeof theme.getTheme === 'function') {
+        try {
+          const scheme = theme.getTheme()?.active?.colorScheme
+          if (MODES.includes(scheme)) return scheme
+        } catch {
+          /* 快照读不到就继续往下退 */
+        }
+      }
+      try {
+        if (typeof document !== 'undefined' && document.body?.hasAttribute('data-ds-dark-theme') === true) return 'dark'
+      } catch {
+        /* 自检环境里没有 document */
+      }
+      return 'light'
+    }
+
+    /**
+     * 设置页正在编辑的模式。默认跟着当前配色走，但要等第一次渲染才知道，
+     * 所以先给个兜底值，apply 里再对齐。
+     */
+    let uiMode = 'light'
+    /** 用户手动切过模式就钉住，不再跟着配色方案跳。 */
+    let modePinned = false
+
+    function setEditMode(mode) {
+      if (!MODES.includes(mode)) return
+      uiMode = mode
+      // 选回“当前正在生效”的那一侧时恢复跟随，选另一侧则钉住。
+      modePinned = mode !== activeMode()
+      emit()
     }
 
     function useStore() {
@@ -492,17 +840,18 @@ window.__ModuleLoader__.load({
         preset.tokens['--dsw-alias-label-primary'],
         preset.tokens['--dsw-alias-state-business-primary'],
       ]
+      const note = t(preset.noteKey)
       return h(
         'button',
         {
           className: active ? 'dshtc-preset is-on' : 'dshtc-preset',
           type: 'button',
-          title: preset.note,
+          title: note,
           'aria-pressed': active ? 'true' : 'false',
           onClick: () => applyPreset(preset.id),
         },
-        h('span', { className: 'dshtc-presetName' }, preset.name),
-        h('span', { className: 'dshtc-presetNote' }, preset.note),
+        h('span', { className: 'dshtc-presetName' }, t(preset.nameKey)),
+        h('span', { className: 'dshtc-presetNote' }, note),
         h(
           'span',
           { className: 'dshtc-presetSwatches' },
@@ -511,15 +860,42 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ColorRow({ item }) {
+    /** 模式切换：一次只编辑一套配色，卡片和取色器都跟着走。 */
+    function ModeTabs({ current }) {
+      return h(
+        'div',
+        { className: 'dshtc-modes' },
+        h('span', { className: 'dshtc-modesLabel' }, t('modeLabel')),
+        MODES.map((mode) => {
+          const count = Object.keys(current[mode]).length
+          const on = mode === uiMode
+          return h(
+            'button',
+            {
+              key: mode,
+              className: on ? 'dshtc-mode is-on' : 'dshtc-mode',
+              type: 'button',
+              title: t('modeHint'),
+              'aria-pressed': on ? 'true' : 'false',
+              onClick: () => setEditMode(mode),
+            },
+            t(mode === 'dark' ? 'modeDark' : 'modeLight'),
+            count > 0 ? h('span', { className: 'dshtc-modeCount' }, String(count)) : null,
+          )
+        }),
+      )
+    }
+
+    function ColorRow({ item, mode }) {
       const current = useStore()
-      const value = current.dark[item.token] ?? item.dark
-      const changed = current.dark[item.token] !== undefined
+      const stored = current[mode][item.token]
+      const value = typeof stored === 'string' ? stored : item[mode]
+      const changed = stored !== undefined
       const [draft, setDraft] = React.useState(value)
 
       React.useEffect(() => {
         setDraft(value)
-      }, [value])
+      }, [value, mode])
 
       const valid = COLOR_PATTERN.test(draft.trim())
 
@@ -533,10 +909,10 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dshtc-rowLabel' },
             h('i', { className: 'dshtc-dot', style: { background: value } }),
-            h('span', null, item.label),
+            h('span', null, t(item.labelKey)),
             h('code', { className: 'dshtc-token' }, item.token),
           ),
-          h('div', { className: 'dshtc-rowDesc' }, item.desc),
+          h('div', { className: 'dshtc-rowDesc' }, t(item.descKey)),
         ),
         h(
           'div',
@@ -544,10 +920,11 @@ window.__ModuleLoader__.load({
           h('input', {
             className: 'dshtc-picker',
             type: 'color',
-            value: toPickerHex(value, item.dark),
+            value: toPickerHex(value, item[mode]),
             title: t('picker'),
-            'aria-label': `${item.token} ${t('picker')}`,
-            onChange: (event) => setColor(item.token, event.target.value),
+            // aria-label 里带上 token 名：读屏能听出是「正文」还是「主背景」，也方便自检定位。
+            'aria-label': `${t(item.labelKey)} (${item.token}) ${t('picker')}`,
+            onChange: (event) => setColor(mode, item.token, event.target.value),
           }),
           h('input', {
             className: valid ? 'dshtc-hex' : 'dshtc-hex is-bad',
@@ -555,11 +932,11 @@ window.__ModuleLoader__.load({
             spellCheck: false,
             value: draft,
             title: t('value'),
-            'aria-label': `${item.token} ${t('value')}`,
+            'aria-label': `${t(item.labelKey)} (${item.token}) ${t('value')}`,
             onChange: (event) => {
               const next = event.target.value
               setDraft(next)
-              if (COLOR_PATTERN.test(next.trim())) setColor(item.token, next)
+              if (COLOR_PATTERN.test(next.trim())) setColor(mode, item.token, next)
             },
             onBlur: () => {
               if (!COLOR_PATTERN.test(draft.trim())) setDraft(value)
@@ -568,7 +945,7 @@ window.__ModuleLoader__.load({
           changed
             ? h(
                 'button',
-                { className: 'dshtc-btn', type: 'button', onClick: () => resetColor(item.token) },
+                { className: 'dshtc-btn', type: 'button', onClick: () => resetColor(mode, item.token) },
                 t('reset'),
               )
             : null,
@@ -576,18 +953,22 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function GroupCard({ group }) {
+    function GroupCard({ group, mode }) {
       return h(
         'div',
         { className: 'dshtc-card' },
-        h('h4', { className: 'dshtc-cardTitle' }, group.title),
-        group.items.map((item) => h(ColorRow, { key: item.token, item })),
+        h('h4', { className: 'dshtc-cardTitle' }, t(group.titleKey)),
+        group.items.map((item) => h(ColorRow, { key: item.token, item, mode })),
       )
     }
 
     function ThemeColorsSection() {
       const current = useStore()
-      const changedCount = Object.keys(current.dark).length
+      const mode = uiMode
+      const modeName = t(mode === 'dark' ? 'modeDark' : 'modeLight')
+      const changedCount = Object.keys(current.dark).length + Object.keys(current.light).length
+      const presets = PRESETS.filter((preset) => preset.mode === mode)
+      const active = activePresetId(mode)
       return h(
         'div',
         { className: 'dshtc-root' },
@@ -618,20 +999,19 @@ window.__ModuleLoader__.load({
           }),
           h('span', null, t('enabled')),
         ),
+        h(ModeTabs, { key: 'modes', current }),
         h(
           'div',
           { className: 'dshtc-card', key: 'presets' },
-          h('h4', { className: 'dshtc-cardTitle' }, t('presets')),
+          h('h4', { className: 'dshtc-cardTitle' }, `${t('presets')} · ${modeName}`),
           h(
             'div',
             { className: 'dshtc-presets' },
-            PRESETS.map((preset) =>
-              h(PresetCard, { key: preset.id, preset, active: preset.id === activePresetId() }),
-            ),
+            presets.map((preset) => h(PresetCard, { key: preset.id, preset, active: preset.id === active })),
           ),
           h('div', { className: 'dshtc-hint' }, t('presetsHint')),
         ),
-        current.enabled ? GROUPS.map((group) => h(GroupCard, { key: group.id, group })) : null,
+        current.enabled ? GROUPS.map((group) => h(GroupCard, { key: group.id, group, mode })) : null,
         h('div', { className: 'dshtc-foot', key: 'foot' }, t('rerun')),
       )
     }
@@ -641,8 +1021,20 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'theme-colors: dictionaries')
 
       theme = ctx.theme ?? null
+      // 设置页默认编辑「当前正在生效」的那一套，跟着主题偏好走。
+      uiMode = activeMode()
       // 早于设置页渲染先应用一次，页面一打开就是用户选的颜色。
       applyOverrides()
+
+      // 用户没手动切过模式时，设置页跟着当前配色方案走（主题偏好里切深/浅色会广播）。
+      ctx.effect(
+        () =>
+          ctx.on('theme/change', () => {
+            if (!modePinned) uiMode = activeMode()
+            emit()
+          }),
+        'theme-colors: follow the active color scheme',
+      )
 
       ctx.effect(
         () => () => {

@@ -97,7 +97,7 @@ window.__ModuleLoader__.load({
       current: '当前',
       checkout: '切换',
       createBranch: '新建分支',
-      newBranchPlaceholder: '新分支名',
+      newBranchPlaceholder: '新分支名（空格自动变 -）',
       startPoint: '起点分支',
       startPointHead: '当前 HEAD',
       merge: '合并到当前分支',
@@ -125,6 +125,7 @@ window.__ModuleLoader__.load({
       stashPopOk: '已恢复贮藏',
       stashNoMessage: '（无说明）',
       noCommits: '还没有任何提交。',
+      graphTruncated: '泳道图在此截断：上面还有未加载的提交，点「加载更多」接上。',
       loadMore: '加载更多',
       by: '作者',
       filesChanged: '{n} 个文件',
@@ -146,6 +147,9 @@ window.__ModuleLoader__.load({
       rootLabel: '仓库',
       tabTitle: 'Git',
       actionFailedNoMessage: '操作没有返回信息',
+      actionTimeout: '命令超时被中断，结果未知——改动可能已经生效，请先看工作区再决定是否重试。',
+      actionFailedCode: 'git 以退出码 {code} 结束，但没有输出错误信息。',
+      actionConflict: 'git 报了冲突，动作没能干净结束：{n} 个文件需要手动解决（{files}）。冲突内容已经写进工作区了，不是没生效；解决后再暂存/提交。',
       pickPath: '选择文件夹',
       dirtyTip: '有未提交的更改，切换分支可能失败',
     }
@@ -204,7 +208,7 @@ window.__ModuleLoader__.load({
       current: 'current',
       checkout: 'Checkout',
       createBranch: 'New branch',
-      newBranchPlaceholder: 'New branch name',
+      newBranchPlaceholder: 'New branch name (spaces become -)',
       startPoint: 'Start point',
       startPointHead: 'Current HEAD',
       merge: 'Merge into current branch',
@@ -232,6 +236,7 @@ window.__ModuleLoader__.load({
       stashPopOk: 'Stash restored',
       stashNoMessage: '(no message)',
       noCommits: 'No commits yet.',
+      graphTruncated: 'Graph is cut off here: earlier commits are not loaded yet. Use "Load more" to continue.',
       loadMore: 'Load more',
       by: 'by',
       filesChanged: '{n} files',
@@ -253,6 +258,9 @@ window.__ModuleLoader__.load({
       rootLabel: 'Repository',
       tabTitle: 'Git',
       actionFailedNoMessage: 'The operation returned no message',
+      actionTimeout: 'The command timed out and was interrupted, so the result is unknown — it may already have taken effect. Check the working tree before retrying.',
+      actionFailedCode: 'git exited with code {code} but produced no error output.',
+      actionConflict: 'git reported conflicts, so the action did not finish cleanly: {n} file(s) need manual resolution ({files}). The conflicting content is already in the working tree — resolve it, then stage and commit.',
       pickPath: 'Pick folder',
       dirtyTip: 'Uncommitted changes may block a checkout',
     }
@@ -348,15 +356,27 @@ window.__ModuleLoader__.load({
 /* 提交列表 */
 .dshg-commit { display:flex; gap:8px; padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--dsw-alias-border-l1); }
 .dshg-commit:hover { background:var(--dsw-alias-bg-layer-2); }
-.dshg-graph { flex:0 0 auto; width:12px; display:flex; flex-direction:column; align-items:center; padding-top:3px; }
-.dshg-node { width:8px; height:8px; border-radius:50%; border:2px solid var(--dsw-alias-brand-primary); flex:0 0 auto; }
-.dshg-thread { width:2px; flex:1 1 auto; background:var(--dsw-alias-border-l2); margin-top:2px; }
+/* 泳道图：整格是一列列竖线，节点压在线上。行高由右侧内容撑开，
+   所以上下两半都用 flex 平分，线才能首尾对齐、跨行连成一条。 */
+.dshg-graph { flex:0 0 auto; position:relative; align-self:stretch; min-height:34px; }
+.dshg-graph-half { position:absolute; left:0; right:0; height:50%; }
+.dshg-graph-half.is-top { top:0; }
+.dshg-graph-half.is-bottom { bottom:0; }
+.dshg-thread { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:var(--dsw-alias-border-l2); }
+/* 主线（第一个父提交那条）用品牌色，和别的分支区分开 */
+.dshg-thread.is-main { background:var(--dsw-alias-brand-primary); opacity:.55; }
+.dshg-graph-join { position:absolute; top:0; height:2px; background:var(--dsw-alias-border-l2); }
+.dshg-node { position:absolute; top:50%; width:8px; height:8px; margin:-5px 0 0 -5px; border-radius:50%; background:var(--dsw-alias-bg-base); border:2px solid var(--dsw-alias-border-l2); box-sizing:border-box; }
+/* 主角：当前 HEAD 那一行的节点放大、实心、用品牌色 */
+.dshg-node.is-head { width:10px; height:10px; margin:-6px 0 0 -6px; background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
 .dshg-commit-main { flex:1 1 auto; min-width:0; }
 .dshg-subject { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dshg-commit-meta { display:flex; gap:8px; margin-top:2px; font-size:10.5px; color:var(--dsw-alias-label-secondary); flex-wrap:wrap; }
 .dshg-hash { font-family:var(--ds-font-family-mono, ui-monospace, monospace); color:var(--dsw-alias-state-business-primary); }
 .dshg-ref { font-size:10px; padding:0 5px; height:15px; line-height:15px; border-radius:7px; background:var(--dsw-alias-bg-layer-2); border:1px solid var(--dsw-alias-border-l2); color:var(--dsw-alias-label-secondary); }
-.dshg-ref.is-head { border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-brand-primary); }
+.dshg-ref.is-head { border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-brand-primary); font-weight:600; }
+/* 图被分页截断时的提示：贴在列表尾，做成弱化的脚注而不是错误。 */
+.dshg-graph-note { padding:8px 12px 8px 30px; font-size:10.5px; line-height:1.5; color:var(--dsw-alias-label-secondary); border-bottom:1px dashed var(--dsw-alias-border-l2); }
 
 /* 分支列表 */
 .dshg-branch { display:flex; align-items:center; gap:6px; padding:5px 10px; cursor:pointer; }
@@ -378,8 +398,9 @@ window.__ModuleLoader__.load({
 .dshg-tab:hover { color:var(--dsw-alias-label-primary); }
 .dshg-tab.is-on { color:var(--dsw-alias-brand-primary); border-bottom-color:var(--dsw-alias-brand-primary); }
 .dshg-sync { display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--dsw-alias-label-secondary); }
-/* 贮藏区：标题 + 下拉选择，下面是应用/恢复/删除按钮。 */
-.dshg-stash { margin-top:7px; padding-top:7px; border-top:1px solid var(--dsw-alias-border-l1); display:flex; flex-direction:column; gap:6px; }
+/* 贮藏区：位于「更改」区块顶部。标题 + 下拉选择，下面是应用/恢复/删除按钮。
+   用下边框与下面的文件列表分隔（它现在在区块内部，不再是提交框的一部分）。 */
+.dshg-stash { display:flex; flex-direction:column; gap:6px; padding:7px 10px; border-bottom:1px solid var(--dsw-alias-border-l1); }
 .dshg-stash-row { display:flex; align-items:center; gap:6px; }
 .dshg-stash-title { font-size:10.5px; color:var(--dsw-alias-label-secondary); flex:0 0 auto; }
 .dshg-stash-select { flex:1 1 auto; min-width:0; height:24px; font-size:11.5px; cursor:pointer; }
@@ -441,6 +462,113 @@ window.__ModuleLoader__.load({
       const date = new Date(value)
       if (Number.isNaN(date.getTime())) return value
       return date.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    }
+
+    /**
+     * 把用户手写的分支名整理成 git 认得的形态：空白换成中划线，并折叠连续的中划线。
+     *
+     * 出现的场合是「输入框 onChange」，所以必须逐字符幂等——用户按一次空格就立刻看到
+     * 一个 `-`，继续按也只是保持一个 `-`，不会出现「删掉一个中划线、光标却被吞字符」的错位。
+     * 只动空白与中划线，不碰 `/`（feature/x 这类分层名是合法且常用的）、`_`、`.` 和中文，
+     * 非法字符交给 git 自己报错，免得把用户的名字悄悄改成别的东西。
+     * @param value - 输入框当前内容。
+     * @returns 规范化后的分支名。
+     */
+    function sanitizeBranchName(value) {
+      return String(value ?? '')
+        .replace(/\s+/g, '-')
+        .replace(/-{2,}/g, '-')
+    }
+
+    /** 泳道最大列数：再多也没人看得懂，超出的一律并到最后一列。 */
+    const MAX_LANES = 6
+
+    /**
+     * 把提交列表算成多泳道拓扑图（每个提交占一行，行内有多条竖线与节点）。
+     *
+     * 输入是 `git log` 的顺序（新→旧），这是关键前提：处理一个提交时，
+     * 它的父提交一定还在后面，所以「谁接着谁」可以靠一次前向扫描定下来。
+     *
+     * 算法：维护 lanes 数组，每格是「一条竖线在等着哪个 commit hash」。
+     *   - 当前提交在 lanes 里占哪一列，就是它的泳道；同一 hash 可能占多列
+     *     （merge 的两个父各自被别的分支占着），全部收拢到最左那列显示。
+     *   - 收拢后，把这些格子都改指向它的父提交（第一个父留原列 = 主线延续，
+     *     其余父插新列 = 分叉），并把重复指向同一 hash 的格子清掉（避免两条线叠在一条上）。
+     *
+     * 分页的坑：只看一页数据时，父提交可能还没加载，竖线到这里就断了。
+     * 所以返回 truncated 标记，由界面提示「还有更多」，而不是假装图是完整的。
+     *
+     * @param commits - 提交数组，新→旧；每项需有 hash 与 parents。
+     * @returns {{rows: Array, laneCount: number, truncated: boolean}} rows 与 commits 等长，
+     *   每项是 { lane, lanes: Array<string|null>, parents: Array<number> }。
+     */
+    function buildGraph(commits) {
+      const list = Array.isArray(commits) ? commits : []
+      const known = new Set(list.map((commit) => commit.hash))
+      let lanes = []
+      const rows = []
+      let laneCount = 0
+      let truncated = false
+
+      for (const commit of list) {
+        const parents = Array.isArray(commit.parents) ? commit.parents : []
+
+        // 找当前提交占用的列；一条都没有说明它是「新出现的线头」（例如当前分支的最新提交）。
+        let mine = []
+        for (let index = 0; index < lanes.length; index += 1) {
+          if (lanes[index] === commit.hash) mine.push(index)
+        }
+        if (mine.length === 0) {
+          // 插到最左的空位；没有空位就追加一列。上限之外统一挤在最后一列。
+          const free = lanes.indexOf(null)
+          const at = free === -1 ? lanes.length : free
+          if (at >= MAX_LANES) {
+            mine = [MAX_LANES - 1]
+            truncated = true
+          } else {
+            if (free === -1) lanes.push(commit.hash)
+            else lanes[free] = commit.hash
+            mine = [at]
+          }
+        }
+        const lane = Math.min(mine[0], MAX_LANES - 1)
+
+        // 收拢：当前提交占的列全部腾出来，交给它的父提交接手。
+        for (const index of mine) lanes[index] = null
+        const parentLanes = []
+        parents.forEach((parent, order) => {
+          if (!known.has(parent)) {
+            // 父提交不在本页里：留一条线表示「图还没完」，等加载更多再接上。
+            truncated = true
+            return
+          }
+          // 已有一列在等这个父提交，就并过去，别为一个提交铺两条线。
+          const existing = lanes.indexOf(parent)
+          if (existing !== -1) {
+            parentLanes.push(Math.min(existing, MAX_LANES - 1))
+            return
+          }
+          // 第一个父沿用它自己那一列（主线延续），其余父插空位（分叉）。
+          let at = order === 0 ? lane : -1
+          if (at === -1 || lanes[at] !== null) at = lanes.indexOf(null)
+          if (at === -1) at = lanes.length
+          if (at >= MAX_LANES) {
+            parentLanes.push(MAX_LANES - 1)
+            truncated = true
+            return
+          }
+          if (at === lanes.length) lanes.push(parent)
+          else lanes[at] = parent
+          parentLanes.push(at)
+        })
+        // 尾部空列裁掉，泳道数才不会只增不减。
+        while (lanes.length > 0 && lanes[lanes.length - 1] === null) lanes.pop()
+        if (lanes.length > laneCount) laneCount = lanes.length
+
+        rows.push({ lane, lanes: lanes.slice(), parents: parentLanes })
+      }
+
+      return { rows, laneCount: Math.min(Math.max(laneCount, 1), MAX_LANES), truncated }
     }
 
     /**
@@ -519,6 +647,36 @@ window.__ModuleLoader__.load({
         else if (line.type === 'del') del += 1
       }
       return { add, del }
+    }
+
+    /**
+     * 把一次失败的动作结果翻译成给人看的文案。
+     *
+     * 关键在于区分三种「失败」，它们的真相完全不同：
+     *   - git 自己报了错：**一定**会往 stderr 写点什么（`error:` / `fatal:`），照抄即可，
+     *     那是最有诊断价值的一手信息；
+     *   - stderr 为空但 stdout 有内容：冲突类信息 git 全写 stdout（`git stash apply`
+     *     撞上冲突就是「退出码 1 + stdout 有 CONFLICT + stderr 空」），而**改动已经
+     *     写进工作区了**。不引用 stdout 的话，用户只会看到「退出码 1、没有输出」，
+     *     于是以为白忙一场——实际恰恰相反；
+     *   - stderr 与 stdout 都空：只可能是进程被超时/信号打断。这时原来的兜底文案
+     *     「操作没有返回信息」把真相盖住了，所以显式说明「结果未知、改动可能已生效」，
+     *     让用户先去看工作区，而不是直接重试——重试一次可能把改动叠加两遍。
+     * @param result - Host 的动作响应。
+     * @returns 展示用的错误文案。
+     */
+    function describeFailure(result) {
+      const message = typeof result?.message === 'string' ? result.message.trim() : ''
+      if (message !== '') return message
+      if (result?.killed === true) return t('actionTimeout')
+      const output = typeof result?.stdout === 'string' ? result.stdout.trim() : ''
+      if (output !== '') {
+        // 只取头几行：git 的冲突摘要动辄五六行，全塞进提示条会盖住整个列表。
+        const lines = output.split('\n').map((line) => line.trim()).filter((line) => line !== '')
+        return lines.length > 3 ? `${lines.slice(0, 3).join(' / ')} …` : lines.join(' / ')
+      }
+      if (typeof result?.code === 'number') return fmt('actionFailedCode', { code: result.code })
+      return t('actionFailedNoMessage')
     }
 
     // ---- 数据访问 ----
@@ -645,12 +803,67 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 提交列表里的一行。 */
-    function CommitRow({ commit, onOpen }) {
+    /**
+     * 提交列表里的一行：左边是泳道图的一格，右边是提交信息。
+     *
+     * 图用纯 div 画（竖线是 2px 宽的 span），不引 SVG：
+     * 行高由内容决定、每行都要重画，div + flex 更简单，也不必算坐标。
+     *
+     * @param props.commit - 提交对象。
+     * @param props.row - buildGraph 算出的这一行 { lane, lanes, parents }。
+     * @param props.laneCount - 总泳道数，决定左侧留多宽。
+     * @param props.isHead - 是不是当前 HEAD 指向的提交（主角要高亮）。
+     * @param props.onOpen - 点开提交详情。
+     */
+    function CommitRow({ commit, row, laneCount, isHead, onOpen }) {
+      const LANE_W = 12
+      const lane = row === undefined ? 0 : row.lane
+      const grid = row === undefined ? [] : row.lanes
+      // 一行里可能有 1~3 段竖线：节点上方接着旧线，下方分给父提交。
+      // 上方的线画成横跨整行；下方的线从节点那列画到各父提交所在列，形成分叉/汇流的斜感。
+      const parentLanes = row === undefined ? [] : row.parents
       return h(
         'div',
         { className: 'dshg-commit', onClick: () => onOpen(commit), role: 'button', tabIndex: 0 },
-        h('div', { className: 'dshg-graph' }, h('span', { className: 'dshg-node' }), h('span', { className: 'dshg-thread' })),
+        h(
+          'div',
+          { className: 'dshg-graph', style: { width: `${Math.max(laneCount, 1) * LANE_W + 4}px` } },
+          // 上半段：节点之前的竖线（这一行网格里除了自己那列之外的线都穿行而过）。
+          h(
+            'div',
+            { className: 'dshg-graph-half is-top' },
+            grid.map((value, index) =>
+              value === null || index === lane
+                ? null
+                : h('span', { key: `t${index}`, className: 'dshg-thread', style: { left: `${index * LANE_W + LANE_W / 2}px` } }),
+            ),
+          ),
+          h('span', {
+            className: `dshg-node${isHead ? ' is-head' : ''}`,
+            style: { left: `${lane * LANE_W + LANE_W / 2}px` },
+          }),
+          // 下半段：节点之后分向各父提交的竖线。父多于一列时加一段横向连线表示汇流。
+          h(
+            'div',
+            { className: 'dshg-graph-half is-bottom' },
+            parentLanes.map((parentLane, index) =>
+              h('span', {
+                key: `b${index}`,
+                className: `dshg-thread${index === 0 ? ' is-main' : ''}`,
+                style: { left: `${parentLane * LANE_W + LANE_W / 2}px` },
+              }),
+            ),
+            parentLanes.length > 1
+              ? h('span', {
+                  className: 'dshg-graph-join',
+                  style: {
+                    left: `${Math.min(...parentLanes) * LANE_W + LANE_W / 2}px`,
+                    width: `${(Math.max(...parentLanes) - Math.min(...parentLanes)) * LANE_W}px`,
+                  },
+                })
+              : null,
+          ),
+        ),
         h(
           'div',
           { className: 'dshg-commit-main' },
@@ -662,7 +875,15 @@ window.__ModuleLoader__.load({
             h('span', null, commit.author),
             h('span', null, formatDate(commit.date)),
             ...(commit.refs ?? []).slice(0, 3).map((ref, index) =>
-              h('span', { key: `${ref}-${index}`, className: `dshg-ref${ref.startsWith('HEAD') ? ' is-head' : ''}` }, ref.replace(/^HEAD -> /, '')),
+              h(
+                'span',
+                {
+                  key: `${ref}-${index}`,
+                  // 当前分支的标签要一眼认出来：HEAD 指向的这一行，它的分支名标签高亮，其余中性。
+                  className: `dshg-ref${isHead && !ref.startsWith('origin/') ? ' is-head' : ''}`,
+                },
+                ref.replace(/^HEAD -> /, ''),
+              ),
             ),
           ),
         ),
@@ -732,6 +953,14 @@ window.__ModuleLoader__.load({
        * 详见 releaseFocus() 的说明——不这么做会让整个应用的键盘输入失效。
        */
       const rootRef = React.useRef(null)
+      /**
+       * 记下「最后一次是本插件把焦点放到了哪个节点上」。
+       *
+       * 自愈 effect 靠它把范围收得极窄：只回收**我们自己放上去、随后又被卸载**的
+       * 那个节点。用户主动点到别处（哪怕是点到面板外、或点到某个随后关闭的浮层）
+       * 都不满足这个条件，因此绝不会被抢走焦点。
+       */
+      const placedFocusRef = React.useRef(null)
 
       /*
        * 焦点兜底。
@@ -752,35 +981,178 @@ window.__ModuleLoader__.load({
        * 两者都只在焦点确实属于面板时才插手，用户主动点到别处绝不干预。
        */
 
-      /** 记下动作开始前焦点是否在面板内，用于事后判断要不要还焦点。 */
+      /**
+       * 判断一个节点是否真的还挂在当前文档里。
+       *
+       * 光看 `isConnected` 还不够：React 换根、宿主搬 pane 之后，旧节点可能
+       * 被保留但已经不在 document 下。这里再沿 parent 链确认一次。
+       * @param node - 待检查的元素。
+       * @returns 节点可用（在其所属文档内）时为 true。
+       */
+      function isLiveNode(node) {
+        if (node === null || node === undefined || node.isConnected !== true) return false
+        const owner = node.ownerDocument ?? (typeof document === 'undefined' ? null : document)
+        if (owner === null || owner.body === null || owner.body === undefined) return true
+        return owner.body.contains(node)
+      }
+
+      /**
+       * 把焦点放到当前的面板根容器上，并记下「是我们放的」。
+       * @returns 是否真的放上去了。
+       */
+      function placeFocusOnRoot() {
+        if (typeof document === 'undefined') return false
+        const target = rootRef.current
+        if (!isLiveNode(target)) return false
+        // tabindex=-1：可编程聚焦，又不进 Tab 序列，不干扰键盘导航。
+        if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
+        target.focus({ preventScroll: true })
+        if (document.activeElement !== target) return false
+        placedFocusRef.current = target
+        return true
+      }
+
+      /**
+       * 记下「动作开始前持有焦点的那个元素」。
+       *
+       * 动作结束后用它做**次选**目标：面板外的输入框已经不在了时，就把焦点还给这个
+       * 控件（点「应用贮藏」时那个按钮就是它）——看得见焦点在哪，而面板容器是个
+       * 不可见 div，焦点落上去等于「不知道被聚焦到哪里了」。这个也没了才退到容器。
+       */
+      const focusReturnRef = React.useRef(null)
+
+      /**
+       * 记下「点面板之前，焦点在面板外的哪个元素上」。
+       *
+       * 这就是「操作完贮藏/丢弃回不到会话输入框」要用的东西：用户本来在输入框里打字，
+       * 鼠标移到面板上点一个按钮，动作做完却把焦点留在了面板里——打字自然没了着落。
+       * 所以动作结束后，只要焦点没有落在用户自己选的地方，就把它还给当初那个输入框。
+       *
+       * 记录时机必须是**指针按下**那一刻：浏览器把焦点交给被点的按钮是 mousedown 的
+       * 默认行为，排在 pointerdown 之后，等点击回调里再读 activeElement 读到的已经是
+       * 面板里的按钮了（`onPointerDownCapture` 恰好在这之前跑）。
+       *
+       * 点面板时焦点本来就在面板里 ⇒ 记 null（而不是保留上一个面板外的元素）：
+       * 用户正打算在面板里连点几下，这时把焦点甩回输入框才是打扰。
+       */
+      const outsideFocusRef = React.useRef(null)
+
+      /**
+       * 指针按在面板上时，先看看焦点原本在哪。
+       *
+       * 不需要事件对象的字段：会触发它就说明「按下发生在面板内」，
+       * 要看的是此刻 `document.activeElement` 在哪。
+       */
+      function rememberOutsideFocus() {
+        if (typeof document === 'undefined') return
+        const root = rootRef.current
+        const active = document.activeElement
+        if (active === null || active === document.body || !isLiveNode(active)) {
+          outsideFocusRef.current = null
+          return
+        }
+        outsideFocusRef.current = root !== null && root.contains(active) ? null : active
+      }
+
+      /**
+       * 记下动作开始前焦点是否在面板内，用于事后判断要不要还焦点。
+       * 焦点在面板内时顺手把那个元素记进 focusReturnRef。
+       * @returns 动作开始时焦点是否在面板内。
+       */
       const captureFocus = React.useCallback(() => {
         if (typeof document === 'undefined') return false
         const root = rootRef.current
         const active = document.activeElement
         if (root === null || active === null || active === document.body) return false
-        return root.contains(active)
+        if (!root.contains(active)) return false
+        focusReturnRef.current = active
+        return true
       }, [])
 
       /**
-       * 把焦点还给面板常驻容器。
+       * 把焦点还回去，按三级退让挑目标：
+       *   ① 面板外原来那个元素（`outsideFocusRef`，通常就是会话输入框）；
+       *   ② 动作前持有焦点的那个控件（`focusReturnRef`，面板内的按钮）；
+       *   ③ 面板容器 —— 兜底，只为不让焦点掉到 `body`（那会让宿主再也恢复不了）。
        *
-       * 只在焦点**已经落空**（body / 无）时才动手：用户若已把焦点放到别处
-       * （比如点了会话输入框），这里必须什么都不做，绝不抢。
+       * 只在焦点「归我们管」时才动手，两种情形都算：
+       *   · 焦点已经落空（`body` / 无）：按钮被 `disabled` 或控件被卸载留下的；
+       *   · 焦点正停在动作前那个控件上：那是点击带过去的，不是用户想去的地方。
+       * 用户若自己把焦点放到了别处（比如点了会话输入框、或点了别的面板），
+       * 这里什么都不做，绝不抢。
+       *
+       * 为什么要试两次：第一次在 microtask 里跑，很可能赶在 React 提交之前——那一刻
+       * 被点过的按钮还带着 `disabled`，浏览器拒绝把焦点交给它。等这一帧过去
+       * （`setTimeout 0`）再试一次，按钮已经重新可用。第一次允许「把焦点从那个控件上
+       * 搬走」，因为那一瞬间用户不可能已经点了别处；第二次必须是严格模式，否则用户
+       * 中途又点了同一个按钮（想再来一次）会被我们抢走。
        */
       const restoreFocus = React.useCallback(() => {
         if (typeof document === 'undefined') return
-        // 等 React 提交完 DOM 再读 activeElement，否则读到的还是旧值。
-        queueMicrotask(() => {
+        /**
+         * 尝试还焦点。
+         * @param takeFromControl - 为 true 时，焦点停在动作前的控件上也照样搬走。
+         */
+        const attempt = (takeFromControl) => {
           if (typeof document === 'undefined') return
           const now = document.activeElement
-          if (now !== null && now !== document.body) return
-          const target = rootRef.current
-          if (target === null || !target.isConnected) return
-          // tabindex=-1：可编程聚焦，又不进 Tab 序列，不干扰键盘导航。
-          if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
-          target.focus({ preventScroll: true })
-        })
+          const parked = now === null || now === document.body
+          const onControl = takeFromControl && now !== null && now === focusReturnRef.current
+          if (!parked && !onControl) return
+          for (const candidate of [outsideFocusRef.current, focusReturnRef.current]) {
+            if (!isLiveNode(candidate)) continue
+            if (candidate.disabled === true || typeof candidate.focus !== 'function') continue
+            candidate.focus({ preventScroll: true })
+            if (document.activeElement === candidate) {
+              placedFocusRef.current = candidate
+              return
+            }
+          }
+          placeFocusOnRoot()
+        }
+        // 等 React 提交完 DOM 再读 activeElement，否则读到的还是旧值。
+        queueMicrotask(() => attempt(true))
+        setTimeout(() => attempt(false), 0)
       }, [])
+
+      /**
+       * 焦点自愈：收拾「本插件放上去、随后那个节点被卸载」的悬空焦点。
+       *
+       * 为什么必须有它——这是「应用贮藏后焦点不知道跑哪去了」的根因。
+       *
+       * `restoreFocus` 是在 `run()` 的 finally 里跑的，那个 microtask 很可能排在
+       * React 提交**之前**：此刻 `rootRef.current` 还是上一轮的根节点 R0，而 R0
+       * 在这一瞬间仍然 connected，于是 `placeFocusOnRoot()` 欣然成功。紧接着
+       * `setStatus(...)` 那一轮提交把面板子树换成新的根节点 R1，**R0 被卸载**，
+       * 可 `document.activeElement` 仍然指着 R0 —— 焦点于是卡在一个脱离文档的节点上。
+       *
+       * 宿主的 `observeSidebarFocus` 救不了这种形态：它捕获焦点时用
+       * `closest('[data-dockkit-pane]')` 找所属 pane，对已卸载的 R0 找不到；
+       * 它的 MutationObserver 也只会去 focus pane，不会修 activeElement。
+       * 用户表现就是「焦点不知道被聚焦到哪里了，打字进不了输入框」。
+       *
+       * 与其跟 React 的调度时序赛跑，不如在「DOM 已经换完之后」统一收口：每次提交后
+       * 检查一下——如果当前焦点正是**我们自己**刚放上去的那个节点、而它现在已经不在
+       * 文档里，就把焦点挪到当前真正的根节点上。
+       *
+       * 三道闸门保证不越界：
+       *   ① 没放过焦点（`placedFocusRef` 为空）就不管；
+       *   ② 焦点不在我们放的那个节点上（用户自己点了别处）就不管；
+       *   ③ 那个节点还活着就不管。
+       */
+      React.useEffect(() => {
+        if (typeof document === 'undefined') return
+        const placed = placedFocusRef.current
+        if (placed === null) return
+        if (document.activeElement !== placed) return
+        if (isLiveNode(placed)) return
+        // 我们放的节点已经被换掉了：把焦点交给当前真正活着的根节点。
+        //
+        // 成功时 placeFocusOnRoot 会把 placedFocusRef 更新成新的根节点，下一轮就不再
+        // 匹配；万一这次没放上（ref 尚未就绪之类），标记保持原样，下一次提交还会再试——
+        // 本 effect 不带依赖数组、每次提交后都跑，天然就是一个会收敛的重试。
+        placeFocusOnRoot()
+      })
 
       /**
        * 在「即将卸载当前焦点元素」的状态更新之前，把焦点主动交还给面板根节点。
@@ -788,6 +1160,10 @@ window.__ModuleLoader__.load({
        * 与 run() 里的 capture/restore 互补：那条覆盖「按钮被 disabled」，
        * 这条覆盖「表单/下拉框整个被卸载」——卸载后再还焦点已经晚了，
        * 焦点会掉进面板这个 tabindex=-1 的容器里，宿主的恢复判断同样不成立。
+       *
+       * 与 restoreFocus 同理：只有当容器**确实还挂在文档里**时才把焦点交给它。
+       * 否则宁可不搬——留在原处等 React 卸载时浏览器自己把焦点交给 body，
+       * 也比塞进一个脱离文档的节点强。
        * @param nodeRef - 指向面板常驻容器的 ref。
        */
       function releaseFocus(nodeRef) {
@@ -796,10 +1172,10 @@ window.__ModuleLoader__.load({
         const root = nodeRef?.current ?? null
         if (active === null || active === document.body) return
         if (root !== null && !root.contains(active)) return
-        const target = root ?? document.body
-        if (target === document.body) return
-        if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
-        target.focus({ preventScroll: true })
+        if (!isLiveNode(root)) return
+        if (!root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1')
+        root.focus({ preventScroll: true })
+        if (document.activeElement === root) placedFocusRef.current = root
       }
 
       // 会话工作目录晚于首次渲染就绪时同步过来（新会话/切工作区都会变）。
@@ -810,11 +1186,20 @@ window.__ModuleLoader__.load({
         }
       }, [cwd])
 
-      /** 刷新仓库状态。失败区分「不是仓库」与「真的报错」。 */
+      /**
+       * 刷新仓库状态。失败区分「不是仓库」与「真的报错」。
+       * @param target - 要刷新的仓库路径，缺省用当前 repoPath。
+       * @param options.keepError - 为 true 时不清理已有的错误提示。
+       *   动作失败后补拉状态时会用到：那一句「改动可能已生效」正是要给人看的，
+       *   若被这次刷新的 setError(null) 抹掉，用户就只看得到一闪而过的提示。
+       * @returns 拿到的状态对象；请求失败或不是仓库时返回 null（调用方要靠它
+       *   判断「这次失败到底改没改工作区」，所以必须把结果交出去）。
+       */
       const refresh = React.useCallback(
-        async (target) => {
+        async (target, options) => {
           const path = target ?? repoPath
-          if (path === '') return
+          if (path === '') return null
+          const keepError = options?.keepError === true
           // 与 run() 同理：刷新按钮也会因为 busy 被 disabled，焦点必须先收回来。
           const hadFocus = captureFocus()
           setBusy(true)
@@ -824,16 +1209,20 @@ window.__ModuleLoader__.load({
               setStatus(null)
               setError(null)
               setNotice('not-a-repo')
-            } else if (payload?.error) {
+              return null
+            }
+            if (payload?.error) {
               setStatus(null)
               setError(payload.message ?? payload.error)
-            } else {
-              setStatus(payload)
-              setError(null)
-              setNotice(null)
+              return null
             }
+            setStatus(payload)
+            if (!keepError) setError(null)
+            setNotice(null)
+            return payload
           } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause))
+            return null
           } finally {
             setBusy(false)
             if (hadFocus) restoreFocus()
@@ -898,12 +1287,29 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer)
       }, [notice])
 
-      /** 统一的写操作入口：跑完顺手刷新状态。 */
+      /**
+       * 统一的写操作入口：跑完顺手刷新状态。
+       * @param action - Host 的动作名。
+       * @param payload - 动作参数。
+       * @param successKey - 成功提示的文案键；不传就没有成功提示。
+       * @param options.confirm - 需要确认时给出的问句。对话框必须**排在 captureFocus()
+       *   之后**：原生确认框会把焦点交给系统（Chromium 里 activeElement 直接掉到 body），
+       *   弹完再读 activeElement 就只读到 body，于是「动之前焦点在面板里」这个判断
+       *   永远为假，焦点再也还不回来——这正是「应用贮藏（保留）之后打字进不了输入框」
+       *   的原因。把弹窗收进这里，所有需要确认的动作都自动走同一条正确的顺序。
+       */
       const run = React.useCallback(
-        async (action, payload, successKey) => {
+        async (action, payload, successKey, options) => {
           // 必须在 setBusy(true) **之前**判断：一旦 busy 生效，正持有焦点的按钮
           // 立刻被 disabled，浏览器随即 blur 它，此刻再读 activeElement 已经晚了。
           const hadFocus = captureFocus()
+          const question = options?.confirm
+          if (question !== undefined && typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(question)) {
+            // 取消也要收拾：弹窗已经把焦点挪出面板，不还回去就是「打字进不了输入框」。
+            // restoreFocus 只在焦点确实空着时才动手，所以中间没弹窗的情况不会被它多事。
+            if (hadFocus) restoreFocus()
+            return null
+          }
           setBusy(true)
           setError(null)
           try {
@@ -914,7 +1320,26 @@ window.__ModuleLoader__.load({
               return null
             }
             if (result?.ok === false) {
-              setError(result.message === '' ? t('actionFailedNoMessage') : result.message)
+              const detail = describeFailure(result)
+              // 报了失败不等于工作区没变：git 可能已经在写盘途中被超时打断
+              // （改动落盘了、进程却非 0 退出），或者干脆是冲突——冲突时
+              // `git stash apply` 退出码 1、stderr 为空、内容全写进 stdout，
+              // 而文件已经带冲突标记落到工作区里了。这时若沿用旧快照，面板会一直
+              // 显示操作前的状态——用户看到「明明应用成功了，界面却说干净」。
+              // 所以失败也必须重新读一次真实状态；keepError 保证这条失败提示
+              // 不会被这次刷新的 setError(null) 顺手抹掉。
+              const fresh = await refresh(undefined, { keepError: true })
+              // 顺手把「失败」说准：工作区里真有冲突文件，就别说成「什么都没发生」
+              // （否则用户看到报错、又看到文件确实变了，只能自己猜哪句是真的）。
+              const conflicted = (fresh?.files ?? []).filter((file) => file.kind === 'conflicted')
+              setError(
+                conflicted.length === 0
+                  ? detail
+                  : fmt('actionConflict', {
+                      n: conflicted.length,
+                      files: conflicted.slice(0, 3).map((file) => file.path).join(', '),
+                    }),
+              )
               return null
             }
             if (result?.status) setStatus(result.status)
@@ -932,7 +1357,7 @@ window.__ModuleLoader__.load({
             if (hadFocus) restoreFocus()
           }
         },
-        [repoPath, loadBranches, captureFocus, restoreFocus],
+        [repoPath, loadBranches, captureFocus, restoreFocus, refresh],
       )
 
       const openDiff = React.useCallback(
@@ -973,15 +1398,14 @@ window.__ModuleLoader__.load({
           // 未跟踪文件的确认语必须说「删除」：那条路径确实是把文件从磁盘上抹掉，
           // 沿用「放弃修改」会让用户以为是可逆的还原。
           const key = file.kind === 'untracked' ? 'deleteUntrackedConfirm' : 'discardConfirm'
-          if (typeof window.confirm === 'function' && !window.confirm(fmt(key, { file: file.path }))) return
-          await run('discard', { files: [file.path] })
+          // 确认框交给 run() 弹：它得排在「记下当前焦点」之后，见 run() 的说明。
+          await run('discard', { files: [file.path] }, undefined, { confirm: fmt(key, { file: file.path }) })
         },
         [run],
       )
 
       const discardAll = React.useCallback(async () => {
-        if (typeof window.confirm === 'function' && !window.confirm(t('discardAllConfirm'))) return
-        await run('discard-all', {}, 'discardAllOk')
+        await run('discard-all', {}, 'discardAllOk', { confirm: t('discardAllConfirm') })
       }, [run])
 
       /** 取当前选中的贮藏条目；没选就返回 null（按钮此时也应该是禁用的）。 */
@@ -1007,6 +1431,7 @@ window.__ModuleLoader__.load({
        *
        * 三种操作都可能改工作区或丢数据，都不做静默，一律先确认；
        * 确认语里带上 ref 与说明文字，让人看清动的到底是哪一条。
+       * 确认框由 run() 弹：它必须先记下当前焦点，弹完再读就已经晚了（见 run() 的说明）。
        * @param kind - 'apply'（保留）| 'pop'（恢复并删除）| 'drop'（删除）。
        */
       const runStash = React.useCallback(
@@ -1015,10 +1440,9 @@ window.__ModuleLoader__.load({
           if (target === null) return
           const key = kind === 'apply' ? 'stashApplyConfirm' : kind === 'pop' ? 'stashPopConfirm' : 'stashDropConfirm'
           const values = { ref: target.ref, message: target.message === '' ? t('stashNoMessage') : target.message }
-          if (typeof window.confirm === 'function' && !window.confirm(fmt(key, values))) return
           const action = kind === 'apply' ? 'stash-apply' : kind === 'pop' ? 'stash-pop' : 'stash-drop'
           const okKey = kind === 'apply' ? 'stashApplyOk' : kind === 'pop' ? 'stashPopOk' : null
-          const result = await run(action, { name: target.ref }, okKey)
+          const result = await run(action, { name: target.ref }, okKey, { confirm: fmt(key, values) })
           // 选中的那条没了（pop/drop）就清空选择，免得下拉框指着一个不存在的 ref。
           // 这一步会把下拉框的值重置，等于让「当前有焦点的元素」发生变更，
           // 所以先把焦点从面板内部挪到常驻容器上，别让它落进看不见的地方。
@@ -1035,11 +1459,15 @@ window.__ModuleLoader__.load({
        *
        * 收起表单 = 卸载那个 autoFocus 的输入框（或承载焦点的「创建」按钮），
        * 所以必须先 releaseFocus，否则焦点会掉进面板容器里，整个应用都打不了字。
-       * @param name - 新分支名。
+       *
+       * 名字在这里再 sanitize 一次：输入框的 onChange 已经做过，但这条路径也是唯一的落库口，
+       * 兜一层才不会因为新增调用方（快捷键、历史补全）而漏掉转换。
+       * @param rawName - 用户输入的新分支名。
        * @param startPoint - 起点分支；空串表示当前 HEAD。
        */
       const createBranch = React.useCallback(
-        async (name, startPoint) => {
+        async (rawName, startPoint) => {
+          const name = sanitizeBranchName(rawName).trim()
           if (name === '') return
           releaseFocus(rootRef)
           const result = await run('create-branch', { name, startPoint }, null)
@@ -1185,6 +1613,67 @@ window.__ModuleLoader__.load({
             )
           : null
 
+      /**
+       * 贮藏区：下拉选择 + 应用/恢复/删除。
+       *
+       * 放在「更改」区块里（而不是提交框下面）：应用贮藏产出的就是未暂存的改动，
+       * 控件与它影响的那份列表放在一起更直观。
+       *
+       * 因此这里绝不能挂在 `unstaged.length > 0` 上——工作区干净时恰恰最需要它
+       * （先把贮藏取出来才有东西可看），那种情况下区块也会为它保留一个位置。
+       */
+      const stashArea =
+        status.stashes !== undefined && status.stashes.length > 0
+          ? h(
+              'div',
+              { className: 'dshg-stash' },
+              h(
+                'div',
+                { className: 'dshg-stash-row' },
+                h('span', { className: 'dshg-stash-title' }, `${t('stash')}：${status.stashes.length}`),
+                h(
+                  'select',
+                  {
+                    className: 'dshg-input dshg-stash-select',
+                    value: stashRef,
+                    'aria-label': t('stashPick'),
+                    onChange: (event) => setStashRef(event.target.value),
+                  },
+                  // 第一项是占位：不预选最新那条，逼用户显式选一次。
+                  h('option', { value: '' }, `— ${t('stashPick')} —`),
+                  status.stashes.map((item) =>
+                    h(
+                      'option',
+                      { key: item.ref, value: item.ref, title: item.message },
+                      `${item.ref}${item.message === '' ? '' : ` · ${item.message}`}`,
+                    ),
+                  ),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'dshg-stash-actions' },
+                // 应用（保留）排在前面并做主按钮：它不动贮藏列表，是更安全的默认选择。
+                h(
+                  'button',
+                  { className: 'dshg-btn is-primary', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('apply') },
+                  t('stashApply'),
+                ),
+                h(
+                  'button',
+                  { className: 'dshg-btn', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('pop') },
+                  t('stashPop'),
+                ),
+                h('span', { className: 'dshg-spacer' }),
+                h(
+                  'button',
+                  { className: 'dshg-btn is-icon is-danger', type: 'button', disabled: busy || selectedStash === null, title: t('stashDrop'), 'aria-label': t('stashDrop'), onClick: () => void runStash('drop') },
+                  '✕',
+                ),
+              ),
+            )
+          : null
+
       /** 变更页：提交框 + 两个分组 + 差异视图。 */
       const changesTab = h(
         React.Fragment,
@@ -1220,59 +1709,9 @@ window.__ModuleLoader__.load({
               ? h('button', { className: 'dshg-btn', type: 'button', disabled: busy, onClick: () => void stashSave() }, t('stashSave'))
               : null,
           ),
-          status.stashes !== undefined && status.stashes.length > 0
-            ? h(
-                'div',
-                { className: 'dshg-stash' },
-                h(
-                  'div',
-                  { className: 'dshg-stash-row' },
-                  h('span', { className: 'dshg-stash-title' }, `${t('stash')}：${status.stashes.length}`),
-                  h(
-                    'select',
-                    {
-                      className: 'dshg-input dshg-stash-select',
-                      value: stashRef,
-                      'aria-label': t('stashPick'),
-                      onChange: (event) => setStashRef(event.target.value),
-                    },
-                    // 第一项是占位：不预选最新那条，逼用户显式选一次。
-                    h('option', { value: '' }, `— ${t('stashPick')} —`),
-                    status.stashes.map((item) =>
-                      h(
-                        'option',
-                        { key: item.ref, value: item.ref, title: item.message },
-                        `${item.ref}${item.message === '' ? '' : ` · ${item.message}`}`,
-                      ),
-                    ),
-                  ),
-                ),
-                h(
-                  'div',
-                  { className: 'dshg-stash-actions' },
-                  // 应用（保留）排在前面并做主按钮：它不动贮藏列表，是更安全的默认选择。
-                  h(
-                    'button',
-                    { className: 'dshg-btn is-primary', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('apply') },
-                    t('stashApply'),
-                  ),
-                  h(
-                    'button',
-                    { className: 'dshg-btn', type: 'button', disabled: busy || selectedStash === null, onClick: () => void runStash('pop') },
-                    t('stashPop'),
-                  ),
-                  h('span', { className: 'dshg-spacer' }),
-                  h(
-                    'button',
-                    { className: 'dshg-btn is-icon is-danger', type: 'button', disabled: busy || selectedStash === null, title: t('stashDrop'), 'aria-label': t('stashDrop'), onClick: () => void runStash('drop') },
-                    '✕',
-                  ),
-                ),
-              )
-            : null,
         ),
         diff === null ? null : h(DiffView, { data: diff.data, loading: diff.loading, error: diff.error, onClose: () => setDiff(null) }),
-        total === 0
+        total === 0 && stashArea === null
           ? h('div', { className: 'dshg-empty' }, `${t('clean')} — ${t('cleanHint')}`)
           : h(
               React.Fragment,
@@ -1317,6 +1756,9 @@ window.__ModuleLoader__.load({
                         ]
                       : null,
                 },
+                // 贮藏区放在「更改」区块里：应用贮藏产出的正是未暂存的改动，
+                // 把它和它会影响的那份列表放在一起，比塞在提交框下面更符合直觉。
+                stashArea,
                 unstaged.map((file) =>
                   h(FileRow, {
                     key: `u-${file.path}`,
@@ -1339,10 +1781,26 @@ window.__ModuleLoader__.load({
           ? h(
               React.Fragment,
               { key: 'history' },
-              log.length === 0 && !logLoading
-                ? h('div', { className: 'dshg-empty' }, t('noCommits'))
-                : log.map((commit) => h(CommitRow, { key: commit.hash, commit, onOpen: openCommit })),
-              logLoading ? h('div', { className: 'dshg-empty' }, t('loading')) : null,
+              ...(() => {
+                if (log.length === 0) return [logLoading ? h('div', { key: 'loading', className: 'dshg-empty' }, t('loading')) : h('div', { key: 'empty', className: 'dshg-empty' }, t('noCommits'))]
+                const graph = buildGraph(log)
+                const nodes = log.map((commit, index) =>
+                  h(CommitRow, {
+                    key: commit.hash,
+                    commit,
+                    row: graph.rows[index],
+                    laneCount: graph.laneCount,
+                    // 当前分支就藏在 refs 里（`HEAD -> main`）；游离 HEAD 时没有这一项，
+                    // 那就退而认 HEAD 自己所在的那一行。
+                    isHead: (commit.refs ?? []).some((ref) => ref.startsWith('HEAD')),
+                    onOpen: openCommit,
+                  }),
+                )
+                // 分页会让图在页尾断开：明确提示，免得用户以为图就长这样。
+                if (graph.truncated) nodes.push(h('div', { key: 'truncated', className: 'dshg-graph-note' }, t('graphTruncated')))
+                return nodes
+              })(),
+              logLoading && log.length > 0 ? h('div', { className: 'dshg-empty' }, t('loading')) : null,
               logMore && !logLoading
                 ? h('div', { className: 'dshg-inline-form' }, h('button', { className: 'dshg-btn', type: 'button', onClick: () => void loadLog(log.length) }, t('loadMore')))
                 : null,
@@ -1446,7 +1904,7 @@ window.__ModuleLoader__.load({
                   placeholder: t('newBranchPlaceholder'),
                   'aria-label': t('newBranchPlaceholder'),
                   autoFocus: true,
-                  onChange: (event) => setNewBranch({ ...newBranch, name: event.target.value }),
+                  onChange: (event) => setNewBranch({ ...newBranch, name: sanitizeBranchName(event.target.value) }),
                   onKeyDown: (event) => {
                     if (event.key === 'Enter' && newBranch.name.trim() !== '') {
                       void createBranch(newBranch.name.trim(), newBranch.startPoint)
@@ -1546,8 +2004,8 @@ window.__ModuleLoader__.load({
                           title: t('delete'),
                           'aria-label': t('delete'),
                           onClick: () => {
-                            if (typeof window.confirm === 'function' && !window.confirm(fmt('deleteBranchConfirm', { name: branch.name }))) return
-                            void run('delete-branch', { name: branch.name }, null).then(() => loadBranches())
+                            // 确认框交给 run() 弹（必须先记下当前焦点，见 run() 的说明）。
+                            void run('delete-branch', { name: branch.name }, null, { confirm: fmt('deleteBranchConfirm', { name: branch.name }) }).then(() => loadBranches())
                           },
                         },
                         '✕',
@@ -1590,7 +2048,7 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'dshg-root', ref: rootRef },
+        { className: 'dshg-root', ref: rootRef, onPointerDownCapture: rememberOutsideFocus },
         h('style', { key: 'style' }, CSS),
         topBar,
         tabsBar,
