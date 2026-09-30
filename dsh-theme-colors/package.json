@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "自定义 DSH 深色模式配色：主背景、侧栏、卡片、文字、强调色与分隔线",
+  "description": "自定义 DSH 深色与浅色两套配色：主背景、侧栏、卡片、文字、强调色与分隔线，内置 15 套护眼预设",
   "license": "MIT",
   "exports": {
     ".": "./index.js",
@@ -14,7 +14,7 @@
   "icon": "./icon.svg",
   "meta": {
     "title": "外观颜色",
-    "description": "用取色器自由调整深色模式的关键配色，改动立即生效。"
+    "description": "用取色器自由调整深色与浅色两套关键配色，内置 15 套护眼预设，改动立即生效。"
   },
   "files": [
     "index.js",
