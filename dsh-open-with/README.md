@@ -57,6 +57,7 @@ DSH 自带的「打开方式」菜单来自 `@deepseek-ai/dsh-host-open-in-app` 
 | `exe` | 否 | 候选可执行文件，支持 `${VAR}` / `%VAR%` / 开头 `~/`，按顺序取第一个存在的 |
 | `registry` | 否 | Windows 兜底：`displayNamePrefix` + `exe`，按卸载记录的 `InstallLocation` 找 |
 | `args` | 否 | 启动参数模板；含 `{path}` 时替换成目录，否则目录追加到末尾（`shell: true` 时不追加） |
+| `cwd` | 否 | 启动时的工作目录模板，支持 `{path}` 与 `${VAR}`；相对路径按工作区解析，不写则终端类用工作区目录 |
 | `shell` | 否 | 默认 `false`。终端类应用（cmd / PowerShell）必须设 `true`，见下方「终端」 |
 | `env` | 否 | 额外注入的环境变量 |
 | `iconPath` | 否 | 图标文件（PNG/SVG）。不写则 Windows 从 exe 提取真实图标，其它平台用占位图 |
@@ -64,14 +65,56 @@ DSH 自带的「打开方式」菜单来自 `@deepseek-ai/dsh-host-open-in-app` 
 | `tolerateExitCode` | 否 | 默认 `true`。见下方「单实例应用」；终端类建议设 `false` |
 | `platforms` | 否 | 限定平台：`win32` / `darwin` / `linux`；不写表示全平台 |
 
+`cwd` 只改被启动进程的当前目录：终端类应用由 `start /d` 负责，所以 `args` 里直接写
+`npm run serve` 即可，不必再拼 `cd /d ...`（那样还容易因为引号被 spawn 转义而失效）。
+
 ### 顶层字段
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `apps` | 内置 CodeBuddy / cmd / PowerShell 三条候选 | 应用清单；留空等同于用内置默认 |
+| `workspaces` | 无 | 按工作区筛选的规则，见下方「按工作区筛选」 |
+| `defaultApps` | 无（不筛选） | 没有命中任何 `workspaces` 规则的工作区展示哪些 id |
 | `probeTimeoutMs` | 8000 | 探测（注册表查询）的单条命令期限 |
 | `iconTimeoutMs` | 8000 | 图标提取的单条命令期限 |
 | `launchWatchMs` | 1200 | 启动看护窗口 |
+
+## 按工作区筛选（不同目录显示不同应用）
+
+同一个 DSH 里开着代码库和文档库时，菜单没必要把 Typora 和 IDE 都列出来。
+在 profile 的 `cordis.patch.yml` 里，本包那条 `config:` 下加 `workspaces`，
+按会话的工作区目录（会话的 `cwd`）决定菜单里出现哪些应用，**按顺序取第一条命中的规则**：
+
+```yaml
+config:
+  apps:
+    - { id: codebuddy, label: CodeBuddy, exe: [...] }
+    - { id: typora, label: Typora, exe: [...] }
+    - { id: cmd, label: 命令提示符, shell: true, exe: [...] }
+  workspaces:
+    - match: 'D:/docs/**'                # 文档库：只留 Typora 和终端
+      apps: [typora, cmd]
+    - match: ['D:/code/**', 'E:/work']   # 代码库：编辑器 + 终端
+      apps: [codebuddy, cmd]
+    - match: 'D:/private'                # 这个工作区一个都不显示（按钮隐藏）
+      apps: []
+  defaultApps: [codebuddy, cmd]          # 都没命中时用这份；不写 = 全部可用
+```
+
+匹配规则：
+
+- `match` 可以是单个字符串或数组，数组里任意一条命中就算命中。
+- 不含通配符时按**目录前缀**解释：`match: 'D:/code/app'` 命中该目录及其所有子目录。
+- `*` 匹配任意个非 `/` 字符（不跨目录），`**` 跨目录，`?` 匹配单个非 `/` 字符；
+  结尾的 `/**` 也包含目录本身（`D:/code/**` 命中 `D:/code`）。
+- Windows 下大小写不敏感，`\` 与 `/` 等价；macOS / Linux 大小写敏感。
+- 第一条命中的规则生效，后面的不再看；`apps: []` 合法，表示该工作区不显示按钮。
+- 菜单是本机可用应用与规则允许项的交集。Host 侧的 `POST /open-with/open` 也会再验一次，
+  被过滤的条目返回 403，不会启动。
+- 「上次用过的应用」同样按工作区各记一份，在文档库里选 Typora 不会顶掉代码库的选择。
+- 这是菜单可见性约束，不是安全边界：能在本机发请求的人本来就能启动任意程序。
+
+改完 profile 配置即时生效（HMR）；菜单没变就再刷新一次页面或重启 DSH。
 
 ## 单实例应用（重要）
 
@@ -116,9 +159,9 @@ Electron 系编辑器（CodeBuddy、Cursor、VS Code…）**已经开着**的时
 
 | 路由 | 方法 | 说明 |
 |---|---|---|
-| `/open-with/apps` | GET | `{ apps: [{ id, label }] }`，只含本机可用的条目 |
+| `/open-with/apps?path=<绝对路径>` | GET | `{ apps: [{ id, label }] }`，只含本机可用且在该工作区允许的条目；不写 `path` 时按 `defaultApps` 处理 |
 | `/open-with/icon/<id>` | GET | 该应用的真实图标（PNG / SVG），提取不到返回 404 |
-| `/open-with/open` | POST | `{ app, path }`，用指定应用打开目录 |
+| `/open-with/open` | POST | `{ app, path }`，用指定应用打开目录；被工作区规则拒绝时返回 403 |
 
 解析结果每进程只算一次；启动时发现 exe 已消失（`ENOENT`）会当场重解析该条目一次，
 所以**卸载方向能自愈**，新装的应用则要重启 DSH 才会出现——和官方 open-in-app 的行为一致。
@@ -139,6 +182,10 @@ node smoke-routes.mjs   # 路由级：三条路由的注册/校验/真实启动�
 - **不含文件打开**：只处理「用某个应用打开工作区目录」。文件菜单仍归官方 `open-in-app` 管。
 - **图标只在 Windows 从 exe 提取**：macOS/Linux 需要显式配 `iconPath`，否则显示占位图。
 - **探测是每进程一次**：装完新应用要重启 DSH 才出现在菜单里。
+- **工作区按字符串比较**：规则匹配会话 `cwd` 的原文，不做 realpath。通过符号链接、
+  Windows 8.3 短路径或不同盘符映射访问的同一目录，需要各自写进 `match`。
+- **工作区规则不是安全边界**：它决定菜单里显示什么，Host 只做同样的二次校验，
+  不当作权限系统。
 
 ## 踩过的坑：点了没反应（`ELECTRON_RUN_AS_NODE`）
 

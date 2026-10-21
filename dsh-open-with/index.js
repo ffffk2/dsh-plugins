@@ -8,9 +8,9 @@
  *
  * 暴露三条路由（相对路径，浏览器直接 fetch 即可；跨源请求会被 connection 围栏挡掉）：
  *
- *   GET  /open-with/apps       本机实际可用的应用列表 [{ id, label, icon }]
- *   GET  /open-with/icon/<id>  该应用的真实图标（Windows 从 exe 提取，或配置的图标文件）
- *   POST /open-with/open       用指定应用打开一个目录：{ app, path }
+ *   GET  /open-with/apps?path=<绝对路径>  本机实际可用、且在该工作区允许的应用 [{ id, label }]
+ *   GET  /open-with/icon/<id>             该应用的真实图标（Windows 从 exe 提取，或配置的图标文件）
+ *   POST /open-with/open                  用指定应用打开一个目录：{ app, path }
  *
  * 设计取舍：
  *   - 只有「能验证出可执行文件」的应用才会出现在列表里，绝不把裸的安装记录当成可启动项。
@@ -129,6 +129,16 @@ function toStringArray(value) {
 }
 
 /**
+ * 同 {@link toStringArray}，但去掉首尾空白并丢弃空项。
+ * 只用于 id / 路径模式这类「空白没有意义」的字段；`args` 不能这么处理。
+ */
+function toTrimmedArray(value) {
+  return toStringArray(value)
+    .map((item) => item.trim())
+    .filter((item) => item !== '')
+}
+
+/**
  * 归一化一条 app 配置。
  * @param raw - cordis.patch.yml 里的原始对象。
  * @param index - 在 apps 数组中的下标，用于生成兜底 id。
@@ -148,6 +158,10 @@ export function normalizeApp(raw, index) {
       exe: toStringArray(registrySource.exe),
     },
     args: toStringArray(source.args),
+    // 应用自己的工作目录模板：终端类应用靠它实现「进到子模块再跑命令」，
+    // 例如先 cd 到 web/ 再 npm run serve。支持 {path} 与环境变量；相对路径
+    // 按工作区解析，不写则沿用工作区目录（终端类）。
+    cwd: typeof source.cwd === 'string' && source.cwd.trim() !== '' ? source.cwd.trim() : undefined,
     env: typeof source.env === 'object' && source.env !== null ? { ...source.env } : undefined,
     iconPath: typeof source.iconPath === 'string' && source.iconPath !== '' ? source.iconPath : undefined,
     watchMs: typeof source.watchMs === 'number' && source.watchMs > 0 ? source.watchMs : undefined,
@@ -158,6 +172,25 @@ export function normalizeApp(raw, index) {
     // 终端类应用（cmd / powershell）必须由 shell 分配一个新的控制台窗口，
     // 直接 spawn 出来的子进程没有窗口站归属，用户看不到任何东西。
     shell: source.shell === true,
+  }
+}
+
+/**
+ * 归一化一条工作区规则。
+ *
+ * `match` 里的模式按声明顺序匹配会话的工作区目录；`apps` 是命中的工作区里
+ * 允许展示的应用 id。`apps` 写成空数组是合法配置，表示这个工作区不显示按钮。
+ *
+ * @param raw - cordis.patch.yml 里的原始对象。
+ * @param index - 在 workspaces 数组中的下标（仅用于错误提示）。
+ * @returns 归一化后的规则。
+ */
+export function normalizeWorkspaceRule(raw, index) {
+  const source = typeof raw === 'object' && raw !== null ? raw : {}
+  return {
+    index,
+    match: toTrimmedArray(source.match),
+    apps: toTrimmedArray(source.apps),
   }
 }
 
@@ -178,13 +211,151 @@ export function normalizeConfig(raw) {
     seen.add(app.id)
     apps.push(app)
   }
+  // 单个对象也当一条规则，省得只配一条时多写一对数组括号。
+  const rawWorkspaces = Array.isArray(source.workspaces)
+    ? source.workspaces
+    : source.workspaces === undefined || source.workspaces === null
+      ? []
+      : [source.workspaces]
+  const workspaces = rawWorkspaces
+    .map((rule, index) => normalizeWorkspaceRule(rule, index))
+    // 没有 match 的规则没有意义，留着反而会让「空规则」意外接管全部工作区。
+    .filter((rule) => rule.match.length > 0)
   const positive = (value, fallback) => (typeof value === 'number' && value > 0 ? value : fallback)
   return {
     apps,
+    // 有规则才按工作区筛选；没有规则 = 保持旧行为（每个工作区看到同一份清单）。
+    workspaces,
+    // null 表示「未命中规则时不做限制」，空数组表示「未命中时一个都不展示」。
+    // YAML 里写了键但没给值（null）按「没配」处理，避免手滑隐藏全部按钮。
+    defaultApps:
+      source.defaultApps === undefined || source.defaultApps === null ? null : toTrimmedArray(source.defaultApps),
     probeTimeoutMs: positive(source.probeTimeoutMs, 8000),
     iconTimeoutMs: positive(source.iconTimeoutMs, 8000),
     launchWatchMs: positive(source.launchWatchMs, 1200),
   }
+}
+
+// ---------------------------------------------------------------------------
+// 工作区匹配
+// ---------------------------------------------------------------------------
+
+/**
+ * 把路径归一化成比较用的键：反斜杠统一成正斜杠、去掉尾部分隔符、
+ * Windows 下转小写（NTFS 默认大小写不敏感）。
+ *
+ * 不做 `//` 折叠：UNC 路径（`\\server\share`）折叠后会和本地根路径混淆。
+ *
+ * @param value - 工作区目录或配置里的匹配模式。
+ * @param platform - process.platform 的值。
+ * @returns 归一化后的字符串；非字符串或空串返回 ''。
+ */
+export function workspaceKey(value, platform) {
+  if (typeof value !== 'string' || value === '') return ''
+  const slashed = value.replace(/\\/g, '/')
+  const trimmed = slashed.replace(/\/+$/, '')
+  if (trimmed === '') return slashed === '' ? '' : '/'
+  return platform === 'win32' ? trimmed.toLowerCase() : trimmed
+}
+
+/** 转义正则元字符（逐字符处理，便于和通配符分支放在一起）。 */
+function escapeRegExpSymbol(character) {
+  return /[\\^$.*+?()[\]{}|]/.test(character) ? `\\${character}` : character
+}
+
+/**
+ * 把通配模式转成正则。
+ *
+ * 支持的通配符刻意只有三个（不做完整 glob）：
+ *   `*`  任意个非 `/` 字符（不跨目录）
+ *   `**` 任意个字符（跨目录）
+ *   `?`  单个非 `/` 字符
+ *
+ * 另外把结尾的 `/**` 处理成「目录本身与它的所有子目录」——
+ * 写 `D:/code/**` 的人通常不想漏掉 `D:/code` 自己。
+ *
+ * @param pattern - 已归一化的模式（见 {@link workspaceKey}）。
+ * @returns 用于整串匹配的正则。
+ */
+export function globToRegExp(pattern) {
+  let body = pattern
+  let includeSelf = false
+  if (body.endsWith('/**')) {
+    body = body.slice(0, -3)
+    includeSelf = true
+  }
+  let source = ''
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index]
+    if (character === '*') {
+      if (body[index + 1] === '*') {
+        if (body[index - 1] === '/' && body[index + 2] === '/') {
+          // `a/**/b`：中间允许零层或多层目录。
+          source += '(?:.*/)?'
+          index += 2
+        } else {
+          source += '.*'
+          index += 1
+        }
+      } else {
+        source += '[^/]*'
+      }
+      continue
+    }
+    if (character === '?') {
+      source += '[^/]'
+      continue
+    }
+    source += escapeRegExpSymbol(character)
+  }
+  return new RegExp(`^${source}${includeSelf ? '(?:/.*)?' : ''}$`)
+}
+
+/**
+ * 判断一个工作区目录是否命中某条匹配模式。
+ *
+ * 不含通配符的模式按「目录前缀」解释（命中自身与所有子目录），这样最常用的
+ * `match: 'D:/code/my-project'` 不必写成 `D:/code/my-project/**`。
+ *
+ * @param path - 会话的工作区目录。
+ * @param pattern - 配置里的匹配模式。
+ * @param platform - process.platform 的值。
+ * @returns 是否命中。
+ */
+export function matchesWorkspace(path, pattern, platform) {
+  const target = workspaceKey(path, platform)
+  const rule = workspaceKey(pattern, platform)
+  if (target === '' || rule === '') return false
+  if (!/[*?]/.test(rule)) {
+    // 根目录（`/`、`C:`）避免拼出 `//` 或 `C://`。
+    const prefix = rule.endsWith('/') ? rule : `${rule}/`
+    return target === rule || target.startsWith(prefix)
+  }
+  return globToRegExp(rule).test(target)
+}
+
+/**
+ * 计算某个工作区允许展示的应用 id 集合。
+ *
+ * @param config - {@link normalizeConfig} 的结果。
+ * @param path - 会话的工作区目录。
+ * @param platform - process.platform 的值。
+ * @returns 允许的 id 集合；`null` 表示不按工作区限制（配置里没有规则）。
+ */
+export function allowedAppIds(config, path, platform) {
+  const rules = Array.isArray(config?.workspaces) ? config.workspaces : []
+  if (rules.length === 0) return null
+  if (typeof path === 'string' && path !== '') {
+    // 声明顺序即优先级：第一条命中的规则生效，后面的不再看。
+    for (const rule of rules) {
+      if (rule.match.some((pattern) => matchesWorkspace(path, pattern, platform))) {
+        return new Set(rule.apps)
+      }
+    }
+  }
+  // 没命中任何规则（或客户端没给路径）：回落到 defaultApps。
+  // defaultApps 缺省是 null = 不限制，保持「不配置就不变」的直觉。
+  return config.defaultApps === null || config.defaultApps === undefined ? null : new Set(config.defaultApps)
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +623,24 @@ export function launchArgs(args, path, options = {}) {
 }
 
 /**
+ * 解析应用启动时的工作目录。
+ *
+ * 模板先代入 `{path}`（工作区目录），再展开 `${VAR}` / `%VAR%` / `~/`；
+ * 结果不是绝对路径时按工作区拼接。这样配置里写 `call-center-web` 或
+ * `{path}/call-center-web` 都能用。
+ *
+ * @param app - 归一化后的应用条目。
+ * @param workspacePath - 会话的工作区目录。
+ * @returns 绝对路径；没配 `cwd` 时原样返回工作区目录，模板无法解析时返回 null。
+ */
+export function resolveWorkingDirectory(app, workspacePath) {
+  if (app.cwd === undefined) return workspacePath
+  const expanded = expandTemplate(app.cwd.replaceAll('{path}', workspacePath))
+  if (expanded === null || expanded === '') return null
+  return isAbsolute(expanded) ? expanded : join(workspacePath, expanded)
+}
+
+/**
  * 规范化成 Windows 反斜杠路径。
  *
  * 配置模板里常写 `${SystemRoot}/System32/cmd.exe`，展开后是 `C:\WINDOWS/System32/cmd.exe`
@@ -519,7 +708,7 @@ export function shellLaunchCommand(exe, args, directory) {
  *
  * @param exe - 可执行文件。
  * @param args - argv。
- * @param options - 看护窗口、附加环境、是否隐藏控制台、是否容忍非零退出码。
+ * @param options - 看护窗口、附加环境、工作目录、是否隐藏控制台、是否容忍非零退出码。
  * @returns 启动成功时 resolve；早期失败 reject。
  */
 export function launchDetached(exe, args, options) {
@@ -529,6 +718,8 @@ export function launchDetached(exe, args, options) {
       child = spawn(exe, [...args], {
         detached: true,
         stdio: 'ignore',
+        // 不配 cwd 时不要传（传 undefined 与不传等价，但显式写出来便于对照）。
+        cwd: options.cwd,
         windowsHide: options.windowsHide === true,
         // 必须清洗环境：父进程是 Electron（DSH 桌面版），ELECTRON_RUN_AS_NODE
         // 会把这个变量传给同样是 Electron 的编辑器，让它退化成纯 Node 进程。
@@ -689,10 +880,22 @@ export function apply(ctx, rawConfig) {
       `open-with: ${path}`,
     )
 
-  route('exact', APPS_PATH, async (_req, res) => {
+  route('exact', APPS_PATH, async (req, res) => {
+    // 工作区目录由调用方用查询参数带上来：同一个 DSH 里不同会话的 cwd 不同，
+    // 菜单要跟着变，不能像以前那样只回一份全局清单。
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const requestedPath = url.searchParams.get('path')
+    if (requestedPath !== null && !isAbsolute(requestedPath)) {
+      sendJson(res, 400, { error: 'bad-path', message: 'path must be absolute.' })
+      return
+    }
+    const allowed = allowedAppIds(config, requestedPath ?? '', platform)
     const resolved = await availability()
     const apps = []
-    for (const [id, entry] of resolved) apps.push({ id, label: entry.app.label })
+    for (const [id, entry] of resolved) {
+      if (allowed !== null && !allowed.has(id)) continue
+      apps.push({ id, label: entry.app.label })
+    }
     sendJson(res, 200, { apps })
   }, 'GET')
 
@@ -758,6 +961,27 @@ export function apply(ctx, rawConfig) {
       return
     }
 
+    // 服务端也要按工作区规则再验一次：列表只是 UI 提示，不能让手工构造的
+    // POST 绕过它去启动一个本工作区不该出现的应用。
+    const allowed = allowedAppIds(config, body.path, platform)
+    if (allowed !== null && !allowed.has(body.app)) {
+      sendJson(res, 403, {
+        error: 'app-not-allowed',
+        message: `${JSON.stringify(body.app)} is not available for this workspace.`,
+      })
+      return
+    }
+
+    // 工作目录模板可能引用环境变量；解析不出来就明确报错，别让命令在错误目录里跑。
+    const workingDirectory = resolveWorkingDirectory(entry.app, body.path)
+    if (workingDirectory === null) {
+      sendJson(res, 400, {
+        error: 'bad-cwd',
+        message: `cannot resolve the working directory of ${JSON.stringify(body.app)}.`,
+      })
+      return
+    }
+
     /**
      * 拼出真正要 spawn 的命令。
      * 终端类应用走 `cmd /c start`（否则拿不到可见控制台窗口），其余直接 argv 启动。
@@ -765,14 +989,17 @@ export function apply(ctx, rawConfig) {
     const commandFor = (target) => {
       // 终端类应用不追加目录参数：起始目录已经交给 start /d 了。
       const argv = launchArgs(target.app.args, body.path, { appendPath: target.app.shell !== true })
-      return target.app.shell ? shellLaunchCommand(target.exe, argv, body.path) : { command: target.exe, argv }
+      if (target.app.shell) return shellLaunchCommand(target.exe, argv, workingDirectory)
+      // GUI 类应用只有在显式配了 cwd 时才改工作目录，避免无意中影响编辑器的相对路径行为。
+      return { command: target.exe, argv, cwd: target.app.cwd === undefined ? undefined : workingDirectory }
     }
 
     const run = async (target) => {
-      const { command, argv } = commandFor(target)
+      const { command, argv, cwd } = commandFor(target)
       return launchDetached(command, argv, {
         watchMs: target.app.watchMs ?? config.launchWatchMs,
         env: target.app.env,
+        cwd,
         tolerateExitCode: target.app.tolerateExitCode,
         // GUI 编辑器的控制台窗口该保持隐藏（由它自己管）；终端类应用正相反，
         // 我们要的就是那个可见的控制台窗口。
@@ -810,4 +1037,15 @@ export function apply(ctx, rawConfig) {
   }, 'POST')
 
   log('info', `已挂载 ${String(config.apps.length)} 个候选应用：${config.apps.map((app) => app.label).join(', ')}`)
+  if (config.workspaces.length > 0) {
+    // 规则里引用不存在的 id 会让整个工作区静默少一个应用，提示一下更好排查。
+    const known = new Set(config.apps.map((app) => app.id))
+    for (const rule of config.workspaces) {
+      const unknown = rule.apps.filter((id) => !known.has(id))
+      if (unknown.length > 0) {
+        log('warn', `工作区规则 #${String(rule.index + 1)} 引用了未定义的应用：${unknown.join(', ')}`)
+      }
+    }
+    log('info', `已启用 ${String(config.workspaces.length)} 条工作区规则`)
+  }
 }

@@ -14,7 +14,7 @@
   "icon": "./icon.svg",
   "meta": {
     "title": "打开方式（自定义）",
-    "description": "在会话头部加一个「用其他应用打开工作区」按钮，内置 CodeBuddy、cmd 与 PowerShell；应用列表由配置驱动，不用改代码就能加新编辑器。"
+    "description": "在会话头部加一个「用其他应用打开工作区」按钮，内置 CodeBuddy、cmd 与 PowerShell；应用列表由配置驱动，不用改代码就能加新编辑器，也能按工作区（目录）筛选。"
   },
   "files": [
     "index.js",

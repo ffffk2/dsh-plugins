@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "打开方式（自定义）",
-    "description": "会话头部的「用其他应用打开工作区」按钮，内置 CodeBuddy、cmd 与 PowerShell，应用列表由配置驱动。"
+    "description": "会话头部的「用其他应用打开工作区」按钮，内置 CodeBuddy、cmd 与 PowerShell，应用列表由配置驱动，可按工作区（目录）筛选。"
   }
 }

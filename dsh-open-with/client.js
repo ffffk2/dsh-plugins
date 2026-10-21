@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     const ICON_ROUTE = 'open-with/icon'
     const OPEN_ROUTE = 'open-with/open'
 
-    /** 记住上次选择，跨会话、跨刷新。 */
+    /** 记住上次选择，跨会话、跨刷新；按工作区各存一份，见 choiceKeyFor。 */
     const CHOICE_KEY = 'dsh.open-with.choice'
 
     const zh = {
@@ -31,6 +31,7 @@ window.__ModuleLoader__.load({
       'action.default': '{app}（默认）',
       'action.none': '没有可用的应用',
       'action.failed': '打开失败，请重试',
+      'action.denied': '该工作区不允许用这个应用打开',
       'action.loading': '正在探测本机应用…',
       'action.unavailable': '当前工作区不可用',
     }
@@ -40,6 +41,7 @@ window.__ModuleLoader__.load({
       'action.default': '{app} (default)',
       'action.none': 'No applications available',
       'action.failed': 'Could not open. Try again.',
+      'action.denied': 'This workspace does not allow this app',
       'action.loading': 'Detecting local applications…',
       'action.unavailable': 'Current workspace unavailable',
     }
@@ -86,18 +88,37 @@ window.__ModuleLoader__.load({
       document.head.appendChild(tag)
     }
 
-    /** 读上次选择，localStorage 不可用时当作没选过。 */
-    function readChoice() {
+    /** 看起来像 Windows 的盘符路径（用来决定要不要按大小写不敏感处理）。 */
+    function isWindowsWorkspace(cwd) {
+      return /^[a-zA-Z]:[\\/]/.test(cwd)
+    }
+
+    /**
+     * 「上次用哪个应用」按工作区分别记：在文档库里选 Typora 不该把代码库的
+     * CodeBuddy 顶掉。键里带目录，所以不同目录互不干扰。
+     *
+     * @param cwd - 会话的工作区目录。
+     * @returns localStorage 键。
+     */
+    function choiceKeyFor(cwd) {
+      if (typeof cwd !== 'string' || cwd === '') return CHOICE_KEY
+      // NTFS 大小写不敏感，`D:\Docs` 和 `d:\docs` 是同一个工作区。
+      return `${CHOICE_KEY}@${isWindowsWorkspace(cwd) ? cwd.toLowerCase() : cwd}`
+    }
+
+    /** 读该工作区上次用的应用；没记过就回落到全局记录，再没有就空串。 */
+    function readChoice(cwd) {
       try {
-        const value = window.localStorage.getItem(CHOICE_KEY)
-        return typeof value === 'string' ? value : ''
+        return window.localStorage.getItem(choiceKeyFor(cwd)) ?? window.localStorage.getItem(CHOICE_KEY) ?? ''
       } catch {
         return ''
       }
     }
 
-    function writeChoice(id) {
+    /** 同时写工作区记录与全局记录：没去过的目录也能继承最近一次选择。 */
+    function writeChoice(cwd, id) {
       try {
+        window.localStorage.setItem(choiceKeyFor(cwd), id)
         window.localStorage.setItem(CHOICE_KEY, id)
       } catch {
         /* 隐私模式写不进去就算了，下次退回第一个 */
@@ -105,51 +126,78 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 页面级的应用清单：只读一次，失败就当作空列表（不渲染按钮）。
+     * 应用清单按工作区缓存。
      *
-     * 用模块级变量而不是 context，是因为这个按钮可能同时出现在多个位置，
-     * 而清单在页面生命周期内不会变（Host 侧解析结果也是每进程一次）。
+     * 清单不能像以前那样全页面只读一次：菜单要跟着会话目录变，Host 侧的
+     * 工作区规则也只有带上 path 才能生效。每个 cwd 只请求一次，结果留在
+     * Map 里；同一个工作区的多个按钮共享同一条记录。
+     *
+     * 用模块级缓存而不是 context，是因为这个按钮可能同时出现在多个位置。
      */
-    const appsStore = {
-      value: null,
-      loading: null,
-      listeners: new Set(),
-      subscribe(listener) {
-        appsStore.listeners.add(listener)
-        return () => {
-          appsStore.listeners.delete(listener)
-        }
-      },
-      publish(value) {
-        appsStore.value = value
-        for (const listener of appsStore.listeners) listener()
-      },
-      load() {
-        if (appsStore.loading !== null) return appsStore.loading
-        appsStore.loading = fetch(APPS_ROUTE, { headers: { accept: 'application/json' } })
-          .then((response) => (response.ok ? response.json() : { apps: [] }))
-          .then((payload) => {
-            const list = Array.isArray(payload?.apps) ? payload.apps : []
-            appsStore.publish(
-              list
-                .filter((entry) => typeof entry?.id === 'string' && entry.id !== '')
-                .map((entry) => ({ id: entry.id, label: typeof entry.label === 'string' && entry.label !== '' ? entry.label : entry.id })),
-            )
-          })
-          .catch(() => {
-            appsStore.publish([])
-          })
-        return appsStore.loading
-      },
+    const appsCache = new Map()
+    const appsListeners = new Set()
+
+    function knownApps(key) {
+      const entry = appsCache.get(key)
+      return entry === undefined ? null : entry.value
     }
 
-    /** 订阅应用清单（useSyncExternalStore，React 18）。 */
-    function useApps() {
-      const snapshot = React.useCallback(() => appsStore.value, [])
-      const value = React.useSyncExternalStore(appsStore.subscribe, snapshot, snapshot)
+    function subscribeApps(listener) {
+      appsListeners.add(listener)
+      return () => {
+        appsListeners.delete(listener)
+      }
+    }
+
+    function publishApps(entry, value) {
+      entry.value = value
+      for (const listener of appsListeners) listener()
+    }
+
+    /**
+     * 拉取某个工作区可用的应用；成功后写回缓存并通知所有按钮。
+     * @param cwd - 工作区目录；空串表示还不知道目录，先按全局清单取。
+     * @returns 该工作区的清单 Promise。
+     */
+    function loadApps(cwd) {
+      const key = cwd
+      let entry = appsCache.get(key)
+      if (entry === undefined) {
+        entry = { value: null, loading: null }
+        appsCache.set(key, entry)
+      }
+      if (entry.value !== null) return Promise.resolve(entry.value)
+      if (entry.loading !== null) return entry.loading
+      const query = key === '' ? '' : `?path=${encodeURIComponent(key)}`
+      entry.loading = fetch(`${APPS_ROUTE}${query}`, { headers: { accept: 'application/json' } })
+        .then((response) => (response.ok ? response.json() : { apps: [] }))
+        .then((payload) => {
+          const list = Array.isArray(payload?.apps) ? payload.apps : []
+          const value = list
+            .filter((item) => typeof item?.id === 'string' && item.id !== '')
+            .map((item) => ({ id: item.id, label: typeof item.label === 'string' && item.label !== '' ? item.label : item.id }))
+          publishApps(entry, value)
+          return value
+        })
+        .catch(() => {
+          publishApps(entry, [])
+          return []
+        })
+      return entry.loading
+    }
+
+    /**
+     * 订阅某个工作区的应用清单（useSyncExternalStore，React 18）。
+     * @param cwd - 会话的工作区目录。
+     * @returns 清单；尚未加载完为 null，加载失败为空数组。
+     */
+    function useApps(cwd) {
+      const key = typeof cwd === 'string' ? cwd : ''
+      const snapshot = React.useCallback(() => knownApps(key), [key])
+      const value = React.useSyncExternalStore(subscribeApps, snapshot, snapshot)
       React.useEffect(() => {
-        if (appsStore.value === null) appsStore.load()
-      }, [])
+        loadApps(key)
+      }, [key])
       return value
     }
 
@@ -192,13 +240,20 @@ window.__ModuleLoader__.load({
     function OpenWithButton(props) {
       const { sessionId, useSessions, t } = props
       const cwd = typeof useSessions === 'function' ? useSessions((sessions) => sessions?.byId?.[sessionId]?.cwd) : undefined
-      const apps = useApps()
+      const workspace = typeof cwd === 'string' ? cwd : ''
+      const apps = useApps(workspace)
 
       const [menuOpen, setMenuOpen] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
       const [failure, setFailure] = React.useState(null)
-      const [choice, setChoice] = React.useState(readChoice)
+      const [choice, setChoice] = React.useState(() => readChoice(workspace))
       const anchorRef = React.useRef(null)
+
+      // 会话目录可能在挂载后才解析出来，或者用户在同一会话里切了工作区：
+      // 换目录就换一份「上次选择」，免得在文档库里沿用代码库的编辑器。
+      React.useEffect(() => {
+        setChoice(readChoice(workspace))
+      }, [workspace])
 
       // 菜单开着时点外面或按 Esc 关掉。
       React.useEffect(() => {
@@ -235,17 +290,19 @@ window.__ModuleLoader__.load({
         fetch(OPEN_ROUTE, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ app: appId, path: cwd }),
+          body: JSON.stringify({ app: appId, path: workspace }),
         })
           .then((response) => {
+            if (response.status === 403) throw Object.assign(new Error('forbidden'), { denied: true })
             if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
             if (remember) {
-              writeChoice(appId)
+              writeChoice(workspace, appId)
               setChoice(appId)
             }
           })
-          .catch(() => {
-            setFailure(t('action.failed'))
+          .catch((error) => {
+            // 403 只会出现在「菜单还是旧的、规则已经变了」的瞬间，提示要能看懂。
+            setFailure(t(error?.denied === true ? 'action.denied' : 'action.failed'))
           })
           .finally(() => {
             setBusy(false)

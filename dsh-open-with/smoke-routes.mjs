@@ -6,9 +6,9 @@
  * 用法：node smoke-routes.mjs
  */
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, normalize } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const { apply } = await import(`file://${join(here, 'index.js').replaceAll('\\', '/')}`)
@@ -232,9 +232,96 @@ await check('open 路由对真实目录 + 真实应用能真正启动（CodeBudd
   console.log(`      已用 ${apps[0].label} 打开 ${workspace}`)
 })
 
+// 工作区规则：同一个 Host 进程里，不同 cwd 必须拿到不同清单。
+// 用 node 自己的可执行文件当被测应用，结果不依赖本机装了哪些编辑器。
+const cwdFile = join(workspace, 'cwd.txt')
+const filtered = makeCtx()
+apply(filtered.ctx, {
+  apps: [
+    { id: 'node', label: 'Node', exe: [process.execPath], args: ['-e', ''] },
+    { id: 'node-alt', label: 'Node Alt', exe: [process.execPath], args: ['-e', ''] },
+    {
+      id: 'node-cwd',
+      label: 'Node cwd',
+      exe: [process.execPath],
+      args: ['-e', 'require("fs").writeFileSync(process.env.SMOKE_OUT, process.cwd())'],
+      cwd: '{path}',
+      env: { SMOKE_OUT: cwdFile },
+    },
+  ],
+  workspaces: [
+    { match: ['**/blocked'], apps: [] },
+    { match: [workspace], apps: ['node', 'node-cwd'] },
+  ],
+  defaultApps: ['node-alt'],
+})
+
+const appsFor = async (target, path) => {
+  const res = makeRes()
+  const query = path === undefined ? '' : `?path=${encodeURIComponent(path)}`
+  await target.routes.get('exact:/open-with/apps').handler(makeReq({ url: `/open-with/apps${query}` }), res)
+  return { res, payload: res.body === null ? null : readJson(res) }
+}
+
+await check('GET /open-with/apps 按工作区过滤', async () => {
+  const { res, payload } = await appsFor(filtered, workspace)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(payload.apps.map((app) => app.id), ['node', 'node-cwd'])
+})
+
+await check('命中 apps: [] 的规则时清单为空', async () => {
+  const { res, payload } = await appsFor(filtered, join(workspace, 'blocked'))
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(payload.apps, [])
+})
+
+await check('未命中规则时回落到 defaultApps', async () => {
+  const { payload } = await appsFor(filtered, join(workspace, '..', 'outside-any-rule'))
+  assert.deepEqual(payload.apps.map((app) => app.id), ['node-alt'])
+})
+
+await check('GET /open-with/apps 拒绝相对路径', async () => {
+  const { res, payload } = await appsFor(filtered, 'relative/workspace')
+  assert.equal(res.statusCode, 400)
+  assert.equal(payload.error, 'bad-path')
+})
+
+await check('open 路由拒绝被工作区规则过滤掉的 app', async () => {
+  const res = makeRes()
+  const body = JSON.stringify({ app: 'node-alt', path: workspace })
+  await filtered.routes.get('exact:/open-with/open').handler(makeReq({ method: 'POST', url: '/open-with/open', body }), res)
+  assert.equal(res.statusCode, 403)
+  assert.equal(readJson(res).error, 'app-not-allowed')
+})
+
+await check('open 路由放行规则内的 app（真实启动 node -e ""）', async () => {
+  const res = makeRes()
+  const body = JSON.stringify({ app: 'node', path: workspace })
+  await filtered.routes.get('exact:/open-with/open').handler(makeReq({ method: 'POST', url: '/open-with/open', body }), res)
+  assert.equal(res.statusCode, 200, `启动失败：${String(res.body)}`)
+})
+
+await check('open 路由按 cwd 启动（子进程确实落在目标目录）', async () => {
+  rmSync(cwdFile, { force: true })
+  const res = makeRes()
+  const body = JSON.stringify({ app: 'node-cwd', path: workspace })
+  await filtered.routes.get('exact:/open-with/open').handler(makeReq({ method: 'POST', url: '/open-with/open', body }), res)
+  assert.equal(res.statusCode, 200, `启动失败：${String(res.body)}`)
+  let actual = null
+  for (let attempt = 0; attempt < 20 && actual === null; attempt += 1) {
+    try {
+      actual = readFileSync(cwdFile, 'utf8').trim()
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+  assert.equal(normalize(actual ?? ''), normalize(workspace))
+})
+
 await check('disposer 能摘掉路由', async () => {
-  for (const dispose of disposers) dispose()
+  for (const dispose of [...disposers, ...filtered.disposers]) dispose()
   assert.equal(routes.size, 0)
+  assert.equal(filtered.routes.size, 0)
 })
 
 rmSync(workspace, { recursive: true, force: true })
