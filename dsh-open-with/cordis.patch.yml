@@ -1,0 +1,85 @@
+# open-with bundle 的 patch 层：插入本包唯一的 Host 行。
+#
+# ── 加一个新的「打开方式」────────────────────────────────────────────────
+# 只需要在下面 apps: 里加一条，然后重启 DSH。字段说明：
+#
+#   id          必填，路由与图标缓存用的稳定标识（ASCII，不要改，改了会丢「上次选择」）
+#   label       菜单里显示的名字
+#   exe         候选可执行文件，按顺序取第一个存在的；支持 ${VAR} 与 %VAR% 与开头 ~/
+#   registry    可选的 Windows 兜底：按卸载记录找 {@see 见 docs}
+#                 displayNamePrefix   DisplayName 的前缀，例如 'CodeBuddy CN'
+#                 exe                 InstallLocation 下的候选相对路径或文件名
+#   args        启动参数模板；含 {path} 时代入目录，否则目录直接追加到末尾
+#   cwd         可选，启动时的工作目录模板；支持 {path} 与环境变量，相对路径按
+#               工作区解析。终端类应用用它实现「进到子模块再跑 npm run serve」。
+#   env         额外注入的环境变量（一般不用写）
+#   iconPath    可选，图标文件（PNG/SVG）；不写则 Windows 从 exe 提取，其它平台用占位图
+#   watchMs     可选，早期失败看护窗口（毫秒），默认 1200
+#   tolerateExitCode  可选，默认 true。Electron 系编辑器已经开着时，新进程会把
+#              请求转交给已运行的实例再退出（退出码常常是 1），这不算失败。
+#              要求严格判断退出码的启动器可以设成 false。
+#   shell       可选，默认 false。终端类应用（cmd / powershell）必须设 true：
+#              DSH 宿主没有控制台，直接 spawn 出来的控制台进程拿不到可见窗口，
+#              只能交给 `cmd /c start /d <目录>` 分配一个新控制台。
+#              shell: true 时目录由 start /d 负责，不会追加到 args 末尾。
+#   platforms   可选，限定平台（win32 / darwin / linux）；不写表示全平台
+#
+# 这个列表是「候选」，只有本机真的能验证出可执行文件的条目才会出现在菜单里。
+# 装到非 C 盘的应用靠 registry 兜底（按卸载记录的 InstallLocation 找 exe），
+# 所以 exe 里写死 Program Files 只是快速路径，不必为了安装路径去改配置。
+#
+# ── 按工作区筛选（可选，不同 cwd 展示不同打开方式）──────────────────────
+# 规则按声明顺序取第一条命中的；apps 里写上面定义过的 id。示例（取消注释后
+# 把路径换成自己的）：
+#
+#   workspaces:
+#     - match: 'D:/docs/**'
+#       apps: [codebuddy, cmd]
+#     - match: ['D:/code/**', 'E:/work']
+#       apps: [codebuddy, cmd, powershell]
+#     - match: 'D:/private'
+#       apps: []                          # 这个工作区不显示按钮
+#   defaultApps: [codebuddy, cmd]         # 都没命中时用这份；不写 = 全部可用
+#
+# match 不含通配符时按目录前缀匹配（命中自身与子目录）；通配符支持 * / ** / ?。
+# Windows 下大小写不敏感、反斜杠与正斜杠等价。
+- insert:
+    - id: open-with
+      name: '@local/dsh-open-with'
+      config:
+        probeTimeoutMs: 8000
+        iconTimeoutMs: 8000
+        launchWatchMs: 1200
+        apps:
+          - id: codebuddy
+            label: CodeBuddy
+            exe:
+              - '${ProgramFiles}/CodeBuddy CN/CodeBuddy CN.exe'
+              - '${ProgramW6432}/CodeBuddy CN/CodeBuddy CN.exe'
+              - '${LOCALAPPDATA}/Programs/CodeBuddy CN/CodeBuddy CN.exe'
+              - '${ProgramFiles}/CodeBuddy/CodeBuddy.exe'
+            registry:
+              displayNamePrefix: CodeBuddy CN
+              exe:
+                - CodeBuddy CN.exe
+                - CodeBuddy.exe
+
+          # ── 终端类：起始目录由 start /d 指定，所以 args 里不需要 {path} ──
+          - id: cmd
+            label: 命令提示符
+            platforms: [win32]
+            shell: true
+            exe: ['${SystemRoot}/System32/cmd.exe']
+            # /k 让窗口执行完停住，不然开出来就关。
+            args: ['/k']
+            # 终端不是单实例应用，start 失败就该报错，别把非零退出码吞掉。
+            tolerateExitCode: false
+
+          - id: powershell
+            label: PowerShell
+            platforms: [win32]
+            shell: true
+            exe: ['${SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe']
+            # -NoExit 保持窗口；-LiteralPath 防止路径里的 [ ] 被当通配符。
+            args: ['-NoExit', '-Command', "Set-Location -LiteralPath '{path}'"]
+            tolerateExitCode: false

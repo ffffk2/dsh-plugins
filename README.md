@@ -7,6 +7,7 @@ DSH（DeepSeek Harness）插件集合。每个插件都是独立的 npm 包，�
 |---|---|---|
 | [dsh-theme-colors](dsh-theme-colors) | 用取色器自定义深色与浅色两套配色，内置 15 套护眼预设，改动立即生效 | 设置 → 外观颜色 |
 | [dsh-token-usage](dsh-token-usage) | 累计记录每次模型调用的 token 用量（全局 / 按模型 / 按天），可设置单价估算费用 | 设置 → Token 统计 |
+| [dsh-open-with](dsh-open-with) | 会话头部的「打开方式」：用 IDE、cmd / PowerShell 或任意配置的应用打开当前工作区 | 会话头部按钮 |
 | dsh-git | （占位，待补充说明） | — |
 
 ## 安装
@@ -34,7 +35,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 
 ```
 index.js          Host 半（有 Host 逻辑的插件才需要，theme-colors 只用来占一行）
-client.js         Client 半：设置页 UI
+client.js         Client 半：设置页或会话头部 UI
 cordis.patch.yml  bundle 的 patch 层
 icon.svg          插件图标
 locale/*.json     插件列表里显示的标题与描述
@@ -50,6 +51,8 @@ README.md         该插件的详细说明
 ```powershell
 node dsh-theme-colors\smoke.mjs
 node dsh-token-usage\smoke.mjs
+node dsh-open-with\smoke.mjs
+node dsh-open-with\smoke-routes.mjs
 ```
 
 用极简 React 在 Node 里跑一遍注册契约、状态清洗与渲染，全 PASS 才算接线正确。
