@@ -1,0 +1,39 @@
+{
+  "name": "@local/dsh-open-with",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "通用「用其他应用打开工作区」：应用列表由配置声明，内置 CodeBuddy、cmd 与 PowerShell，加新编辑器/终端只需改一行 cordis.patch.yml。",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "打开方式（自定义）",
+    "description": "在会话头部加一个「用其他应用打开工作区」按钮，内置 CodeBuddy、cmd 与 PowerShell；应用列表由配置驱动，不用改代码就能加新编辑器。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

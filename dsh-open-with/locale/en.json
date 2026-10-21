@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Open with (custom)",
+    "description": "Session-header button that opens the workspace in an application declared in configuration, with built-in CodeBuddy, cmd, and PowerShell."
+  }
+}
