@@ -1,0 +1,29 @@
+{
+  "name": "@local/dsh-git-pr",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Slash commands to commit changes and open pull requests: /commit, /create-pr and /commit-pr.",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "Git Commit & PR",
+    "description": "Slash commands /commit, /create-pr and /commit-pr: review changes, write the commit message in the repo's own style, push, and open a GitHub or GitLab pull request."
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

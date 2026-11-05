@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git 提交与 PR",
+    "description": "斜杠命令 /commit、/create-pr、/commit-pr：审查改动、按仓库风格生成提交信息、推送并创建 GitHub 或 GitLab 的 PR/MR。"
+  }
+}
