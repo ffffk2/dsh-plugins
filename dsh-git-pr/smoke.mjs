@@ -1,21 +1,19 @@
 /**
  * dsh-git-pr 的自检脚本。
  *
- * 与另外几个插件一样：不启动浏览器、不连 DSH，用极简替身在 Node 里把真实的
- * 注册契约、纯函数和 **真 git 流程** 各跑一遍。
+ * 这个插件是纯 Host、纯命令：它不自己执行 git，而是把**操作规程**排进会话让模型去做。
+ * 所以冒烟测试的重心从「真跑 git」换成了三件事：
  *
- *   - Host 侧真的建临时仓库（本地 bare 仓库当远端），跑 /commit 与失败的
- *     /create-pr 分支，断言工作区、提交内容、错误文案都符合预期；
- *   - 安全扫描用真实文件验证：凭据文件、密钥字面量必须拦住，正常代码不能误伤；
- *   - Client 半不存在（这个插件是纯 Host），所以额外断言「没有任何前端文件」；
- *   - 用 `execFile` 而不是开 shell，天然覆盖了「参数里有空格/引号」的情形。
+ *   1. 注册契约：三个命令真的注册了、名字合法、描述与 input.hint 齐全；
+ *   2. 指令质量：三条指令都必须带着全部硬性约定（不许 force、不许 --no-verify、
+ *      先扫描再 add、不编造测试结果…），缺一条就等于那条命令会出事故；
+ *   3. 投递行为：handler 真的调用 `agent.followup()`，消息结构合法、参数被带进去、
+ *      没有 Agent 时给明确错误而不是抛异常。
  *
  * 用法：node dsh-git-pr\smoke.mjs
  * 退出码 0 且打印 ALL PASS 才算过。
  */
-import { execFile } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -39,24 +37,8 @@ function group(title) {
   console.log(`\n${title}`)
 }
 
-/** 跑一条命令并收集结果（不抛异常）。 */
-function run(cwd, command, args) {
-  return new Promise((settle) => {
-    execFile(command, args, { cwd, timeout: 120_000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
-      settle({ ok: error === null, code: error === null ? 0 : (error.code ?? 1), stdout: stdout ?? '', stderr: stderr ?? '' })
-    })
-  })
-}
-
-/** 必须成功的 git 命令，失败就直接抛（说明测试环境坏了，不是插件坏了）。 */
-async function mustGit(cwd, args) {
-  const result = await run(cwd, 'git', args)
-  if (!result.ok) throw new Error(`git ${args.join(' ')} 失败：${result.stderr}`)
-  return result.stdout
-}
-
 /** 假 ctx：只提供 apply 真正用到的那几个入口。 */
-function makeCtx({ tools } = {}) {
+function makeCtx() {
   const commands = []
   const disposers = []
   const logs = []
@@ -74,10 +56,7 @@ function makeCtx({ tools } = {}) {
       disposers.push({ label, dispose })
       return dispose
     },
-    get(name) {
-      if (name === 'tools') return tools
-      return undefined
-    },
+    get: () => undefined,
     logger: {
       info: (message) => logs.push(['info', message]),
       warn: (message) => logs.push(['warn', message]),
@@ -86,6 +65,20 @@ function makeCtx({ tools } = {}) {
     logs,
     disposers,
   }
+}
+
+/** 假 agent：记录 followup 收到的消息。 */
+function makeAgent() {
+  const received = []
+  return {
+    agent: { id: 'session-test', followup: (message) => received.push(message) },
+    received,
+  }
+}
+
+/** 假 invocation。 */
+function makeInvocation(agent, rawInput = '') {
+  return { agent, rawInput, signal: new AbortController().signal, commandId: 'test', attachments: [] }
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +94,7 @@ const icon = readFileSync(join(HERE, 'icon.svg'), 'utf8')
 
 check(pkg.name === '@local/dsh-git-pr', 'package.json name 为 @local/dsh-git-pr')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', '声明了 dsh.bundle.patch')
-check(patch.includes("id: git-pr") && patch.includes("name: '@local/dsh-git-pr'"), 'patch 里插入了 git-pr 行')
+check(patch.includes('id: git-pr') && patch.includes("name: '@local/dsh-git-pr'"), 'patch 里插入了 git-pr 行')
 check(pkg.files.includes('index.js') && pkg.files.includes('cordis.patch.yml'), 'files 覆盖运行所需文件')
 check(pkg.exports['./locale/*.json'] === './locale/*.json', 'exports 暴露 locale')
 check(typeof zh.meta?.title === 'string' && zh.meta.title !== '', 'zh.json 有标题')
@@ -120,7 +113,7 @@ check(!hasClient, '这是纯 Host 插件，没有 client.js')
 check(pkg.dsh?.client === undefined, 'package.json 没有声明 dsh.client')
 
 // ---------------------------------------------------------------------------
-// 2. 模块形状与命令注册
+// 2. 模块形状与注册
 // ---------------------------------------------------------------------------
 group('注册契约')
 
@@ -128,10 +121,9 @@ const mod = await import(new URL('./index.js', import.meta.url).href)
 check(mod.name === 'git-pr', 'name 导出为 git-pr（等于 patch 行 id）')
 check(Array.isArray(mod.inject) && mod.inject.includes('commands'), 'inject 只硬依赖 commands')
 check(typeof mod.apply === 'function', '导出 apply')
-check(typeof mod.normalizeConfig === 'function', '导出 normalizeConfig')
 
-const ctx = makeCtx({ tools: { register: () => () => {} } })
-mod.apply(ctx, undefined)
+const ctx = makeCtx()
+mod.apply(ctx)
 const names = ctx.registry.commands.map((definition) => definition.name).sort()
 check(names.join(',') === 'commit,commit-pr,create-pr', '/commit、/commit-pr、/create-pr 都已注册')
 for (const definition of ctx.registry.commands) {
@@ -139,309 +131,131 @@ for (const definition of ctx.registry.commands) {
   check(typeof definition.input?.hint === 'string' && definition.input.hint.trim() !== '', `/${definition.name} 有 input.hint`)
   check(typeof definition.handler === 'function', `/${definition.name} 有 handler`)
 }
-check(/^[a-z][a-z0-9_-]*$/u.test('create-pr'), 'create-pr 符合宿主命令名规则（只允许小写与中划线）')
+check(/^[a-z][a-z0-9_-]*$/u.test('create-pr'), 'create-pr 符合宿主命令名规则')
 check(ctx.disposers.length >= 3, '注册都走了 ctx.effect（可被卸载）')
 
 // ---------------------------------------------------------------------------
-// 3. 配置清洗
+// 3. 指令内容：三条命令都必须带上全部硬性约定
 // ---------------------------------------------------------------------------
-group('配置清洗')
+group('指令内容')
 
-const cfgDefault = mod.normalizeConfig(undefined)
-check(cfgDefault.provider === '' && cfgDefault.model === '', '无配置时留空（跟随会话路由）')
-check(cfgDefault.registerTool === true, '默认注册工具')
-const cfgHalf = mod.normalizeConfig({ provider: 'x' })
-check(cfgHalf.provider === '' && cfgHalf.model === '', '只给 provider 视为没给（必须成对）')
-const cfgFull = mod.normalizeConfig({ provider: ' p ', model: ' m ', registerTool: false })
-check(cfgFull.provider === 'p' && cfgFull.model === 'm', '成对的 provider/model 会去空白并生效')
-check(cfgFull.registerTool === false, 'registerTool: false 被保留')
-
-// ---------------------------------------------------------------------------
-// 4. 纯函数
-// ---------------------------------------------------------------------------
-group('纯函数')
-
-const { parseRemote, parseStatus, parsePrCopy, compareUrl, fallbackSubject, clampChars, unwrap, secretKinds, isSecretPath } = mod.__internals
-
-const github = parseRemote('git@github.com:ffffk2/dsh-plugins.git')
-check(github?.kind === 'github' && github.owner === 'ffffk2' && github.repo === 'dsh-plugins', '解析 scp 风格 GitHub 地址')
-check(github?.webBase === 'https://github.com/ffffk2/dsh-plugins', 'scp 风格也给出 https 网页地址')
-
-const gitlab = parseRemote('https://gitlab.example.com/group/sub/repo.git')
-check(gitlab?.kind === 'gitlab', '识别 GitLab')
-check(gitlab?.owner === 'group/sub', '自建 GitLab 的多层命名空间保留下来')
-
-const ssh = parseRemote('ssh://git@gitlab.example.com:2222/group/repo.git')
-check(ssh?.kind === 'gitlab' && ssh.repo === 'repo', '解析 ssh:// 且带端口的地址')
-
-check(parseRemote('D:\\code\\plugins\\foo')?.kind === 'local', 'Windows 盘符远端识别为本地路径')
-check(parseRemote('../remote.git')?.kind === 'local', '相对路径远端识别为本地路径')
-check(parseRemote('not a url') === null, '非 URL 返回 null')
-check(parseRemote('https://github.com/only-owner') === null, '缺少仓库名返回 null')
-
-const statusRaw = [' M a.js', 'A  b.js', '?? c.js', 'R  d.js', 'e.js', ''].join('\0')
-const parsedStatus = parseStatus(statusRaw)
-check(parsedStatus.length === 4, 'porcelain -z 解析出 4 个条目（重命名的原路径被跳过）')
-check(parsedStatus[0].path === 'a.js' && parsedStatus[0].staged === false, '未暂存条目 staged=false')
-check(parsedStatus[1].path === 'b.js' && parsedStatus[1].staged === true, '已暂存条目 staged=true')
-check(parsedStatus[2].untracked === true, '未跟踪条目被标记')
-check(parsedStatus[3].path === 'd.js', '重命名只保留新路径')
-
-const copy = parsePrCopy('TITLE: feat: 支持提交\nBODY:\n## 变更内容\n- 加了命令')
-check(copy?.title === 'feat: 支持提交', '解析 TITLE')
-check(copy?.body.includes('## 变更内容'), '解析 BODY')
-check(parsePrCopy('') === null, '空输出解析为 null')
-const noBody = parsePrCopy('TITLE: fix: 修一下')
-check(noBody?.title === 'fix: 修一下', '只有标题时也能解析')
-const noTitle = parsePrCopy('BODY:\n## 变更内容\n- x')
-check(noTitle !== null && noTitle.title === '## 变更内容', '没有标题时用正文首行兜底')
-
-const link = compareUrl(github, 'main', 'feat/x', '标题', '正文')
-check(link.startsWith('https://github.com/ffffk2/dsh-plugins/compare/main...feat%2Fx?'), 'GitHub 生成 compare 链接')
-check(link.includes('expand=1'), 'GitHub 链接带 expand=1')
-const mrLink = compareUrl(gitlab, 'main', 'feat/x', '标题', '')
-check(mrLink.includes('/-/merge_requests/new?'), 'GitLab 生成 MR 新建链接')
-check(!mrLink.includes('body='), 'GitLab 链接不塞正文（它走 description 字段）')
-
-check(clampChars('abcdef', 4).length === 4, 'clampChars 按码点截断')
-check(clampChars('中文中文中文', 4) === '中文中…', '中文按码点截断不出现半个字')
-check(clampChars('中文中文中文', 4) !== '中文中\uFFFD', '截断后没有替换字符')
-check(unwrap('"hello"') === 'hello', 'unwrap 去掉包裹引号')
-check(fallbackSubject([{ path: 'src/a.js', untracked: false }], '') .startsWith('更新 src'), '兜底主题行带变更类型与范围')
-check(fallbackSubject([], '手写的说明') === '手写的说明', '兜底主题行优先用用户给的说明')
-
-check(isSecretPath('.env') && isSecretPath('a/.env.local') && isSecretPath('keys/server.pem'), '凭据文件名被识别')
-check(isSecretPath('id_rsa') && isSecretPath('config/.npmrc'), 'SSH 私钥与 npmrc 被识别')
-check(!isSecretPath('src/environment.js'), 'environment.js 不被误判成 .env')
-check(!isSecretPath('src/index.js'), '普通源码文件不命中')
-
-check(secretKinds("const password = 'hunter2hunter2'").includes('secret-literal'), '识别硬编码密码')
-check(secretKinds('token: process.env.GITHUB_TOKEN').length === 0, '引用环境变量不算密钥')
-check(secretKinds("apiKey: '<REPLACE_ME>'").length === 0, '占位符不算密钥')
-check(secretKinds('const key = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaa"').includes('github-token'), '识别 GitHub token')
-check(secretKinds("-----BEGIN RSA PRIVATE KEY-----").includes('private-key-block'), '识别私钥块')
-check(secretKinds('const x = 1').length === 0, '普通代码不误伤')
-
-// ---------------------------------------------------------------------------
-// 5. 真 git 流程
-// ---------------------------------------------------------------------------
-group('真实仓库流程')
-
-const sandbox = mkdtempSync(join(tmpdir(), 'dsh-git-pr-'))
-const repoDir = join(sandbox, 'repo')
-const remoteDir = join(sandbox, 'remote.git')
-let cleaned = false
-
-try {
-  await mustGit(sandbox, ['init', '-q', '--bare', '-b', 'main', remoteDir])
-  await mustGit(sandbox, ['init', '-q', '-b', 'main', repoDir])
-  await mustGit(repoDir, ['config', 'user.email', 'smoke@example.com'])
-  await mustGit(repoDir, ['config', 'user.name', 'Smoke Test'])
-  await mustGit(repoDir, ['config', 'commit.gpgsign', 'false'])
-  await mustGit(repoDir, ['remote', 'add', 'origin', remoteDir])
-
-  writeFileSync(join(repoDir, 'README.md'), '# demo\n')
-  await mustGit(repoDir, ['add', '-A'])
-  await mustGit(repoDir, ['commit', '-q', '-m', 'chore: 初始化仓库'])
-  await mustGit(repoDir, ['push', '-q', '-u', 'origin', 'main'])
-
-  const repo = await mod.__internals.repoOf(repoDir)
-  check(repo?.root !== undefined && repo.root !== '', 'repoOf 认出仓库根')
-  check((await mod.__internals.currentBranch(repoDir)) === 'main', 'currentBranch 读当前分支')
-  check((await mod.__internals.remoteBranchExists(repoDir, 'main')) === true, '远端分支探测成功')
-  check((await mod.__internals.defaultBase(repoDir)) === 'main', 'defaultBase 认 origin/HEAD')
-
-  // 干净的仓库：/commit 不该造出空提交。
-  const clean = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(clean.kind === 'success' && clean.text.includes('没有可提交的改动'), '工作区干净时 /commit 不造空提交')
-
-  // 有改动：/commit 应真的提交，并回填哈希。
-  writeFileSync(join(repoDir, 'feature.js'), 'export const answer = 42\n')
-  mkdirSync(join(repoDir, 'src'), { recursive: true })
-  writeFileSync(join(repoDir, 'src/util.js'), 'export const twice = (n) => n * 2\n')
-  const committed = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(committed.kind === 'success', '/commit 成功')
-  check(/已在 main 上提交 [0-9a-f]{7,}/u.test(committed.text), '回报里带短哈希')
-  check(committed.text.includes('本地提交，尚未推送'), '明确说明只做了本地提交')
-  const logAfter = await mustGit(repoDir, ['log', '-1', '--pretty=format:%s%n%b'])
-  check(logAfter.trim() !== '', '确实产生了一条提交')
-  check(!/Generated with|Co-authored-by/u.test(logAfter), '规则兜底的提交信息没有工具署名')
-  const statusAfter = await mustGit(repoDir, ['status', '--porcelain'])
-  check(statusAfter.trim() === '', '提交后工作区干净')
-
-  // 路径范围：只暂存指定目录。
-  writeFileSync(join(repoDir, 'src', 'more.js'), 'export const three = 3\n')
-  writeFileSync(join(repoDir, 'other.js'), 'export const other = 1\n')
-  const scoped = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, 'src')
-  check(scoped.kind === 'success', '带路径范围时 /commit 成功')
-  const scopedFiles = await mustGit(repoDir, ['show', '--name-only', '--pretty=format:', 'HEAD'])
-  check(scopedFiles.includes('src/more.js'), '指定范围内的文件进了提交')
-  check(!scopedFiles.includes('other.js'), '范围外的文件没有被提交')
-  const stillPending = await mustGit(repoDir, ['status', '--porcelain'])
-  check(stillPending.includes('other.js'), '范围外的文件仍是未提交状态')
-
-  // 安全扫描：凭据文件必须拦住，而且不能动暂存区。
-  await mustGit(repoDir, ['add', 'other.js'])
-  writeFileSync(join(repoDir, '.env'), 'SECRET=1\n')
-  const blocked = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(blocked.kind === 'error', '出现 .env 时 /commit 被拦住')
-  check(blocked.text.includes('.env'), '错误信息点名了命中的文件')
-  check(blocked.text.includes('credential-file'), '错误信息给出了命中原因')
-  check(blocked.text.includes('/commit .env'), '错误信息给出继续的办法')
-  const indexAfterBlock = await mustGit(repoDir, ['diff', '--cached', '--name-only'])
-  check(indexAfterBlock.includes('other.js'), '被拦住时用户原有的暂存内容没被清掉')
-
-  // 硬编码密钥：拦住。
-  rmSync(join(repoDir, '.env'))
-  writeFileSync(join(repoDir, 'config.js'), "export const password = 'hunter2hunter2'\n")
-  const secretBlocked = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(secretBlocked.kind === 'error', '硬编码密码时 /commit 被拦住')
-  check(secretBlocked.text.includes('secret-literal'), '错误信息说明是密钥字面量')
-
-  // 环境变量写法：不该误伤。
-  writeFileSync(join(repoDir, 'config.js'), "export const password = process.env.DB_PASSWORD\n")
-  const allowed = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(allowed.kind === 'success', '读取环境变量的写法不会被误拦')
-
-  // 推送与 PR 前置检查。
-  await mustGit(repoDir, ['push', '-q', 'origin', 'main'])
-  const onBase = await mod.__internals.runCreatePr(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(onBase.kind === 'error' && onBase.text.includes('就在目标分支'), '在 base 分支上时明确拒绝建 PR')
-
-  await mustGit(repoDir, ['switch', '-q', '-c', 'feat/smoke'])
-  writeFileSync(join(repoDir, 'feature2.js'), 'export const four = 4\n')
-  await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  // feat/smoke 领先 main 一条提交，所以这里应该真的推送。远端是本地 bare 仓库，
-  // 没有 PR 平台可调——必须明确说出来，而不是伪造一个 PR 链接。
-  const localRemote = await mod.__internals.runCreatePr(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(localRemote.kind === 'success', '远端是本地路径时仍成功推送')
-  check(localRemote.text.includes('本地路径'), '明确说明 origin 是本地路径')
-  check(localRemote.text.includes('没有可以创建 PR 的平台'), '明确说明没有 PR 平台，而不是伪造链接')
-  check(!/https?:\/\//u.test(localRemote.text), '不会给出打不开的假链接')
-  const remoteBranches = await mustGit(remoteDir, ['branch', '--list', 'feat/smoke'])
-  check(remoteBranches.includes('feat/smoke'), '分支确实推到了远端')
-  check(!localRemote.text.includes('--force'), '汇报里不会建议 force push')
-
-  // 把 origin 换成一个能解析出平台、但连不上的地址：走降级链，最终给链接。
-  await mustGit(repoDir, ['remote', 'set-url', 'origin', 'https://github.com/smoke-test/nonexistent-repo.git'])
-  await mustGit(repoDir, ['update-ref', `refs/remotes/origin/main`, 'refs/heads/main'])
-  writeFileSync(join(repoDir, 'feature3.js'), 'export const five = 5\n')
-  await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  const linkFallback = await mod.__internals.runCreatePr(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  // 推送会因为凭据/网络失败（不留凭据、不弹交互），这一步必须是「如实失败」。
-  check(linkFallback.kind === 'error', '推不上去时如实报错而不是报成功')
-  check(linkFallback.text.includes('推送失败'), '错误信息指明卡在推送这一步')
-  check(!/https?:\/\/github\.com\/smoke-test/u.test(linkFallback.text) || linkFallback.text.includes('推送失败'), '不会在推送失败时假装 PR 建好了')
-
-  // 工作区有未提交改动时不允许建 PR（否则 PR 内容与描述不一致）。
-  await mustGit(repoDir, ['remote', 'set-url', 'origin', remoteDir])
-  writeFileSync(join(repoDir, 'dirty.js'), 'export const dirty = true\n')
-  const dirty = await mod.__internals.runCreatePr(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(dirty.kind === 'error' && dirty.text.includes('没提交'), '工作区有改动时拒绝建 PR')
-
-  // /commit-pr：一步走完。
-  const both = await mod.__internals.runCommitPr(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: repoDir } } },
-    signal: new AbortController().signal,
-  })
-  check(both.kind === 'success', '/commit-pr 成功')
-  check(both.text.includes('已在 feat/smoke 上提交') || both.text.includes('提交'), '/commit-pr 汇报里包含提交结果')
-  check(both.text.includes('─'.repeat(24)), '/commit-pr 把提交与 PR 两段结果分开')
-
-  // 非仓库目录：给明确错误而不是崩。
-  const notRepo = mkdtempSync(join(sandbox, 'plain-'))
-  const plain = await mod.__internals.runCommit(ctx, mod.normalizeConfig(undefined), {
-    agent: { session: { header: { cwd: notRepo } } },
-    signal: new AbortController().signal,
-  }, '')
-  check(plain.kind === 'error' && plain.text.includes('不是 Git 仓库'), '非仓库目录给出明确错误')
-
-  // handler 捕获异常：绝不让宿主看到未处理的 rejection。
-  const definition = ctx.registry.commands.find((entry) => entry.name === 'commit')
-  const thrown = await definition.handler({
-    agent: undefined,
-    rawInput: '',
-    signal: new AbortController().signal,
-    commandId: 'x',
-    attachments: [],
-  })
-  check(thrown.kind === 'error', 'handler 把异常转成 error 结果（不会抛到宿主）')
-} finally {
-  if (!cleaned) {
-    cleaned = true
-    rmSync(sandbox, { recursive: true, force: true })
-  }
+const { commitInstruction, createPrInstruction, commitPrInstruction, RULES } = mod.__internals
+const instructions = {
+  commit: commitInstruction(''),
+  'create-pr': createPrInstruction(''),
+  'commit-pr': commitPrInstruction(''),
 }
 
-// ---------------------------------------------------------------------------
-// 6. 工具形态
-// ---------------------------------------------------------------------------
-group('工具形态')
-
-const registered = []
-const toolCtx = makeCtx({ tools: { register: (definition) => { registered.push(definition); return () => {} } } })
-mod.apply(toolCtx, undefined)
-check(registered.length === 1, '注册了一个工具')
-const tool = registered[0]
-check(tool.name === 'git_commit_pr', '工具名是 git_commit_pr')
-check(typeof tool.execute === 'function', '工具有 execute')
-check(tool.parameters?.required?.includes('action'), 'action 是必填参数')
-check(Array.isArray(tool.parameters?.properties?.action?.enum) && tool.parameters.properties.action.enum.join(',') === 'commit,create-pr,commit-pr', 'action 枚举覆盖三种操作')
-check(tool.output?.schema?.type === 'object', '输出 schema 是对象根（宿主强制要求）')
-check(typeof tool.output?.render === 'function', '输出有 render（宿主强制要求）')
-
-const noToolCtx = makeCtx({ tools: undefined })
-let threw = false
-try {
-  mod.apply(noToolCtx, undefined)
-} catch {
-  threw = true
+for (const [label, text] of Object.entries(instructions)) {
+  check(text.length > 300, `${label} 的指令有实质内容`)
+  check(text.includes('--force'), `${label} 明确提到不许 force`)
+  check(text.includes('--no-verify'), `${label} 明确提到不许跳过钩子`)
+  check(text.includes('git status'), `${label} 要求先看真实状态`)
+  check(text.includes('如实'), `${label} 要求如实报告`)
+  check(text.includes(RULES), `${label} 内联了统一约定段`)
 }
-check(threw === false, '没有 tools 服务时 apply 不抛异常（工具是可选增强）')
-check(noToolCtx.registry.commands.length === 3, '没有 tools 服务时命令照旧注册')
 
-const disabledCtx = makeCtx({ tools: { register: () => () => {} } })
-mod.apply(disabledCtx, { registerTool: false })
-check(disabledCtx.registry.commands.length === 3, 'registerTool:false 时命令仍注册')
+check(RULES.includes('凭据') || RULES.includes('token'), '统一约定里有凭据/密钥约束')
+
+// 提交规程
+check(instructions.commit.includes('没有可提交的改动'), '提交规程说明了「没有改动」怎么办（如实说，不造空提交）')
+check(instructions.commit.includes('不要创建空提交'), '提交规程禁止空提交')
+check(!/命中任意一项就停止/.test(instructions.commit) === false, '提交规程要求安全审查命中即停')
+for (const pattern of ['.env', '*.pem', 'id_rsa', '.npmrc', '.netrc']) {
+  check(instructions.commit.includes(pattern), `提交规程的凭据清单包含 ${pattern}`)
+}
+check(instructions.commit.includes('5 MB'), '提交规程拦截超大文件')
+check(instructions.commit.includes('git add -A'), '提交规程给了默认暂存方式')
+check(instructions.commit.includes('72'), '提交规程限制主题行长度')
+check(instructions.commit.includes('BREAKING CHANGE'), '提交规程覆盖破坏性变更')
+check(/Generated with/u.test(instructions.commit), '提交规程禁止工具署名')
+check(instructions.commit.includes('git log --oneline -20'), '提交规程要求学习仓库既有风格')
+check(instructions.commit.includes('detached HEAD'), '提交规程处理 detached HEAD（建分支而不是直接失败）')
+
+// PR 规程
+check(instructions['create-pr'].includes('gh pr create'), 'PR 规程包含 gh 路径')
+check(instructions['create-pr'].includes('GITHUB_TOKEN'), 'PR 规程包含 token API 路径')
+check(instructions['create-pr'].includes('compare/'), 'PR 规程包含网页链接兜底')
+check(instructions['create-pr'].includes('glab mr create'), 'PR 规程包含 GitLab CLI')
+check(instructions['create-pr'].includes('merge_requests/new'), 'PR 规程包含 GitLab 网页兜底')
+check(instructions['create-pr'].includes('PULL_REQUEST_TEMPLATE'), 'PR 规程支持仓库模板')
+check(instructions['create-pr'].includes('绝不编造测试结果'), 'PR 规程禁止编造验证结果')
+check(instructions['create-pr'].includes('ls-remote'), 'PR 规程用 ls-remote 校验目标分支')
+check(
+  instructions['create-pr'].includes('当前分支**等于 base**') || instructions['create-pr'].includes('当前分支等于 base'),
+  'PR 规程处理「就在主干上」——建特性分支而不是报错',
+)
+check(!instructions['create-pr'].includes('没有东西可以开 PR'), 'PR 规程里没有硬性阻断文案')
+check(!instructions['create-pr'].includes('没有内容可以开 PR'), 'PR 规程里没有第二条硬性阻断文案')
+
+// commit-pr 规程
+check(instructions['commit-pr'].includes('没有改动就跳过提交'), 'commit-pr 说明无改动时跳过提交')
+check(instructions['commit-pr'].includes('新建特性分支'), 'commit-pr 说明在主干上时新建分支')
+check(instructions['commit-pr'].includes('git push -u origin HEAD'), 'commit-pr 给出推送命令')
+
+// 用户参数必须透传
+check(commitInstruction('src/').includes('src/'), '提交规程带上用户给的路径参数')
+check(createPrInstruction('develop').includes('develop'), 'PR 规程带上用户给的目标分支')
+check(commitPrInstruction('修复登录超时').includes('修复登录超时'), 'commit-pr 规程带上用户给的说明')
+check(!commitInstruction('').includes('用户这次给的说明或路径范围'), '没有参数时不出现空的参数段')
+check(!createPrInstruction('').includes('用户这次给的参数'), '没有参数时不出现空的参数段')
 
 // ---------------------------------------------------------------------------
-// 7. 代码风格约定（与仓库其它插件一致）
+// 4. 投递行为
+// ---------------------------------------------------------------------------
+group('投递行为')
+
+const { createInstructionMessage, enqueue } = mod.__internals
+
+const message = createInstructionMessage('hello')
+check(message.role === 'user', '消息 role 是 user')
+check(typeof message.id === 'string' && message.id.length >= 8, '消息带唯一 id')
+check(Array.isArray(message.content) && message.content[0]?.type === 'text', '消息内容是 text 块')
+check(message.content[0].text === 'hello', '消息文本原样保留')
+check(message.source?.kind === 'git-pr', '消息 source 标明来自本插件')
+check(Object.isFrozen(message), '消息被深冻结（不会被就地改写）')
+check(Object.isFrozen(message.content[0]), '嵌套结构也冻结')
+check(createInstructionMessage('a').id !== createInstructionMessage('b').id, '两条消息 id 不同')
+
+const freshAgent = makeAgent()
+const result = enqueue(makeInvocation(freshAgent.agent, ''), 'instruction text', 'summary text')
+check(result.kind === 'success', 'enqueue 成功时返回 success')
+check(result.text === 'summary text', 'enqueue 把 summary 作为命令结果回报')
+check(freshAgent.received.length === 1, '真的调用了 agent.followup 一次')
+check(freshAgent.received[0].content[0].text === 'instruction text', 'followup 收到的就是指令正文')
+
+const noAgent = enqueue(makeInvocation(undefined, ''), 'x', 'y')
+check(noAgent.kind === 'error', '没有 Agent 时返回 error 而不是抛异常')
+check(noAgent.text.includes('会话'), '错误信息说明了原因')
+
+const brokenAgent = { id: 'x', followup: () => { throw new Error('inbox full') } }
+const broken = enqueue(makeInvocation(brokenAgent, ''), 'x', 'y')
+check(broken.kind === 'error' && broken.text.includes('inbox full'), 'followup 抛异常时被捕获并如实回报')
+
+// 通过真实 handler 走一遍：三个命令都要能把指令排进会话。
+for (const definition of ctx.registry.commands) {
+  const agent = makeAgent()
+  const outcome = await definition.handler(makeInvocation(agent.agent, 'arg-here'))
+  check(outcome.kind === 'success', `/${definition.name} 的 handler 返回 success`)
+  check(agent.received.length === 1, `/${definition.name} 的 handler 排进了 1 条消息`)
+  const text = agent.received[0].content[0].text
+  check(text.includes('arg-here'), `/${definition.name} 把用户参数带进了指令`)
+  check(text.length > 400, `/${definition.name} 排进去的指令足够完整`)
+}
+
+// handler 里任何异常都不能冒到宿主
+const throwingDefinition = ctx.registry.commands[0]
+const safe = await throwingDefinition.handler({
+  get agent() {
+    throw new Error('agent blew up')
+  },
+  rawInput: '',
+  signal: new AbortController().signal,
+})
+check(safe.kind === 'error', 'handler 把异常转成 error 结果（不会抛到宿主）')
+
+// ---------------------------------------------------------------------------
+// 5. 代码风格约定
 // ---------------------------------------------------------------------------
 group('代码风格')
 
@@ -450,15 +264,9 @@ check(!source.includes('\r\n'), 'index.js 是 LF 行尾')
 check(!/\t/u.test(source), 'index.js 使用空格缩进（无制表符）')
 const runtimeImports = [...source.matchAll(/^import .* from '([^']+)'/gmu)].map((match) => match[1])
 check(runtimeImports.every((specifier) => specifier.startsWith('node:')), '运行时只依赖 node:* 内置模块')
-check(runtimeImports.length > 0, '确实有 import（不是空文件）')
-check(source.includes('execFile('), '用 execFile 调 git（数组传参，不经 shell）')
-// 只认真正的子进程调用：正则字面量的 .exec() 与源码无关。
-check(!/child_process[\s\S]{0,200}\bexec\(/u.test(source), '没有用 exec（避免 shell 拼接注入）')
-check(!/^\s*exec\(/mu.test(source), '没有裸 exec( 调用')
-// 文档里出现的 ``--force`` 是「本插件不用它」的说明，只断言真的没把它当参数发出去。
-check(!/'--force'|"--force"|'--force-with-lease'|"--force-with-lease"/u.test(source), '没有任何地方把 --force 当参数传给 git')
-check(!/'--no-verify'|"--no-verify"/u.test(source), '没有任何地方把 --no-verify 当参数传给 git')
-check(source.includes('GIT_TERMINAL_PROMPT'), '禁用 git 的交互式凭据提示')
+// 插件包没有声明对官方包的依赖，跨包 import 在 profile 里可能解析不到。
+check(!source.includes('@deepseek-ai/'), '没有 import 任何官方包（避免跨包解析失败）')
+check(!/child_process|execFile/u.test(source), '不再自己执行 git（改由模型用它的工具执行）')
 
 // 收尾
 console.log(`\n共 ${checks} 项断言，失败 ${failures} 项`)
