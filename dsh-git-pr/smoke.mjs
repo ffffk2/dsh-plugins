@@ -6,7 +6,7 @@
  *
  *   1. 注册契约：三个命令真的注册了、名字合法、描述与 input.hint 齐全；
  *   2. 指令质量：三条指令都必须带着全部硬性约定（不许 force、不许 --no-verify、
- *      先扫描再 add、不编造测试结果…），缺一条就等于那条命令会出事故；
+ *      提交前不额外 review、不编造测试结果…），缺一条就等于那条命令会出事故；
  *   3. 投递行为：handler 真的调用 `agent.followup()`，消息结构合法、参数被带进去、
  *      没有 Agent 时给明确错误而不是抛异常。
  *
@@ -160,11 +160,11 @@ check(RULES.includes('凭据') || RULES.includes('token'), '统一约定里有�
 // 提交规程
 check(instructions.commit.includes('没有可提交的改动'), '提交规程说明了「没有改动」怎么办（如实说，不造空提交）')
 check(instructions.commit.includes('不要创建空提交'), '提交规程禁止空提交')
-check(!/命中任意一项就停止/.test(instructions.commit) === false, '提交规程要求安全审查命中即停')
-for (const pattern of ['.env', '*.pem', 'id_rsa', '.npmrc', '.netrc']) {
-  check(instructions.commit.includes(pattern), `提交规程的凭据清单包含 ${pattern}`)
-}
-check(instructions.commit.includes('5 MB'), '提交规程拦截超大文件')
+// 用户发起 /commit 时改动已经 review 过：规程里不能再有「先审一遍、命中就停下来问」这种闸门。
+check(!instructions.commit.includes('安全审查'), '提交规程不再做安全审查（用户发起命令前已 review）')
+check(!instructions.commit.includes('命中任意一项就停止'), '提交规程不设「命中即停、等用户决定」的闸门')
+check(instructions.commit.includes('已经 review 过'), '提交规程写明改动已由用户 review 过，直接提交')
+check(instructions.commit.includes('git diff --stat'), '提交规程只看 stat 级别的改动概况')
 check(instructions.commit.includes('git add -A'), '提交规程给了默认暂存方式')
 check(instructions.commit.includes('72'), '提交规程限制主题行长度')
 check(instructions.commit.includes('BREAKING CHANGE'), '提交规程覆盖破坏性变更')

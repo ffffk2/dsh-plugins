@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Git Commit & PR",
-    "description": "Slash commands /commit, /create-pr and /commit-pr: review changes, write the commit message in the repo's own style, push, and open a GitHub or GitLab pull request."
+    "description": "Slash commands /commit, /create-pr and /commit-pr: commit the changes, write the commit message in the repo's own style, push, and open a GitHub or GitLab pull request."
   }
 }

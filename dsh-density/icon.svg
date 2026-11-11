@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Layout density">
+  <rect x="6" y="6" width="52" height="52" rx="14" fill="#151517" />
+  <rect x="14" y="14" width="36" height="36" rx="9" fill="#2c2c2e" />
+  <g stroke="#f9fafb" stroke-width="2.2" stroke-linecap="round" opacity="0.55">
+    <path d="M20 23h24" />
+    <path d="M20 29h17" />
+  </g>
+  <g stroke="#7aaaff" stroke-width="2.2" stroke-linecap="round">
+    <path d="M20 38h24" />
+    <path d="M20 43h24" />
+    <path d="M20 48h13" />
+  </g>
+</svg>

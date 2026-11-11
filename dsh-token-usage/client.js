@@ -1,17 +1,17 @@
 /**
  * Token 统计 —— Client 半。
  *
- * 设置面板里的一个 `settings.section` 页面，做成仪表盘：
- *   ① 主视觉：总 Token（渐变数字 + 滚动动画）+ 缓存命中率圆环
- *   ② 构成条：输入 / 输出 / 缓存命中（+ 缓存写入、推理，有值才出现）堆叠占比
- *   ③ 费用卡：总费用（¥）+ 已定价模型数 + 单价编辑表
- *   ④ 趋势图：近 7 / 14 / 30 天柱状图，逐根生长动画，悬停看具体数值
- *   ⑤ 按模型表：列自适应（全为 0 的列不出现）+ 每行占比条 + 该模型费用
- *   ⑥ 按天表：默认 7 行，可展开到全部
+ * 设置面板里的一个 `settings.section` 页面，布局对齐 ZCode（zai-org/ZCode）的
+ * 「设置 → Usage」：
+ *   ① 指标条：累计 Token / 峰值 Token / 最长会话 / 当前连续天数 / 最长连续天数
+ *   ② Token 活动热力图：最近 52 个自然周，可切「每日 / 每周 / 累计」
+ *   ③ 时间范围（近 7 日 / 近 30 日）+ 每日多模型折线趋势图（悬停看当天各模型）
+ *   ④ 模型用量环形图 + 明细列表（占比、Token 数）
+ *   ⑤ 底部：刷新 / 清零，以及数据文件与兜底提示
  *
- * 数据来自同包 Host 半的 GET /token-usage/stats；清零走 POST /token-usage/reset；
- * 单价读写走 GET/POST /token-usage/prices。
- * 只用宿主主题 token（--dsw-alias-*）着色，不引入任何 Harness Client 包。
+ * 数据来自同包 Host 半的 GET /token-usage/stats?range=7d|30d|all；清零走
+ * POST /token-usage/reset。图表全部手写 SVG，只用宿主主题 token 着色，
+ * 不引入任何第三方图表库或 Harness Client 包。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-token-usage',
@@ -22,280 +22,365 @@ window.__ModuleLoader__.load({
     const NS = 'token-usage'
     const STATS_PATH = '/token-usage/stats'
     const RESET_PATH = '/token-usage/reset'
-    const PRICES_PATH = '/token-usage/prices'
-    const RINGS = { size: 88, radius: 34, width: 8 }
-    /** 单价单位：人民币元 / 百万 token（与 Host 半一致）。 */
-    const PER_TOKENS = 1_000_000
-    /** 计费项顺序，zh/en 的 label 键与 Host 返回的 cost.items 字段同名。 */
-    const PRICE_FIELDS = [
-      { field: 'input', label: 'input' },
-      { field: 'output', label: 'output' },
-      { field: 'cacheRead', label: 'cacheRead' },
-      { field: 'cacheWrite', label: 'cacheWrite' },
+    const RANGE_OPTIONS = ['7d', '30d']
+    const HEATMAP_MODES = ['daily', 'weekly', 'cumulative']
+    /** 环形图最多画 6 片，多出来的合并成「其他模型」（与 ZCode 一致）。 */
+    const MAX_PIE_SLICES = 6
+    const OTHER_KEY = '__other__'
+    const MERGED_KEY = '__merged__'
+    const DURATION_UNITS = [
+      { key: 'durationDay', ms: 86_400_000 },
+      { key: 'durationHour', ms: 3_600_000 },
+      { key: 'durationMinute', ms: 60_000 },
+      { key: 'durationSecond', ms: 1_000 },
     ]
 
     const zh = {
       nav: 'Token 统计',
-      title: '模型 Token 累计',
+      title: 'Token 统计',
       live: '实时记录中',
-      total: '总 Token',
-      perCall: '平均每次',
-      calls: '调用次数',
-      breakdown: 'Token 构成',
-      input: '输入',
-      output: '输出',
-      cacheRead: '缓存命中',
-      cacheWrite: '缓存写入',
-      reasoning: '推理',
-      cacheHitRate: '缓存命中率',
-      trend: '消耗趋势',
-      dayUnit: '天',
-      byModel: '按模型',
-      byDay: '按天',
-      model: '模型',
-      day: '日期',
-      share: '占比',
+      lifetimeTotalTokens: '累计 Token 数',
+      lifetimePeakTokens: '峰值 Token 数',
+      longestSession: '最长会话',
+      currentStreak: '当前连续天数',
+      longestStreak: '最长连续天数',
+      heatmapTitle: 'Token 活动',
+      heatmapDaily: '每日',
+      heatmapWeekly: '每周',
+      heatmapCumulative: '累计',
+      heatmapLess: '较少',
+      heatmapMore: '较多',
+      heatmapCell: '{date}\n{tokens} tokens · {calls} 次调用',
+      heatmapWeeklyCell: '{date} 当周\n{tokens} tokens · {calls} 次调用',
+      heatmapCumulativeCell: '截至 {date} 当周累计\n{tokens} tokens · {calls} 次调用',
+      rangeTitle: '时间范围',
+      range7d: '近 7 日',
+      range30d: '近 30 日',
+      dailyChartTitle: '每日 Token 趋势图',
+      modelChartTitle: '模型用量',
+      otherModel: '其他模型',
+      unattributed: '未分模型',
+      unknownModel: '未知模型',
+      tokenUnit: 'tokens',
+      emptyTitle: '还没有可展示的数据',
+      emptyDescription: '发出任意一次模型对话后回到这里即可看到统计。',
+      emptyRange: '这个时间范围内没有用量。',
+      loading: '加载中…',
       refresh: '刷新',
       reset: '清零',
-      confirmReset: '确定清零累计统计吗？此操作不可撤销。单价设置会保留。',
-      loading: '加载中…',
-      empty: '暂无记录。发出任意一次模型对话后回到这里即可看到累计。',
+      confirmReset: '确定清零累计统计吗？此操作不可撤销；清零前会自动留一份快照。',
+      resetDone: '已清零',
       file: '数据文件',
       since: '统计起始',
       updated: '最近更新',
+      build: '代码版本',
       failed: '读取失败：',
-      expand: '展开全部',
-      collapse: '收起',
-      cost: '费用',
-      costTitle: '费用估算',
-      totalCost: '总费用',
-      costNote: '按你在下方填写的单价估算，仅供参考；未定价的模型不计入。',
-      priced: '已定价',
-      unpriced: '未定价',
-      partialPrice: '单价不全',
-      priceTitle: '模型单价',
-      priceHint: '单位：元 / 百万 token。留空表示不计算该项，全部留空即该模型不计费。',
-      priceUnit: '/ 百万 token',
-      save: '保存单价',
-      saving: '保存中…',
-      saved: '单价已保存',
-      resetPrices: '清空单价',
-      confirmResetPrices: '确定清空所有模型单价吗？',
-      priceInput: '输入单价',
-      priceOutput: '输出单价',
-      priceCacheRead: '缓存命中单价',
-      priceCacheWrite: '缓存写入单价',
-      costInput: '输入费用',
-      costOutput: '输出费用',
-      costCacheRead: '缓存命中费用',
-      costCacheWrite: '缓存写入费用',
-      priceEmpty: '还没有任何模型记录。先发起一次对话，这里就能给模型填单价了。',
-      priceDirty: '有未保存的修改',
-      priceSavedAt: '单价更新于',
       corruptBackup: '上次启动时累计文件损坏，已备份到',
       restoredFrom: '已从快照恢复累计：',
       resetBackup: '清零前的数据已快照保存：',
-      resetDone: '已清零',
       staleTitle: '正在运行的是旧版插件代码',
       staleHint: '磁盘上的 index.js 已更新，但 DSH 仍在使用启动时加载的版本（Node 会缓存已导入的模块）。请完全退出并重启 DSH Desktop，否则新功能不会生效。',
-      build: '代码版本',
+      durationDay: '天',
+      durationHour: '小时',
+      durationMinute: '分钟',
+      durationSecond: '秒',
     }
 
     const en = {
       nav: 'Token Usage',
-      title: 'Model token totals',
+      title: 'Token usage',
       live: 'Recording',
-      total: 'Total tokens',
-      perCall: 'Per call',
-      calls: 'Calls',
-      breakdown: 'Composition',
-      input: 'Input',
-      output: 'Output',
-      cacheRead: 'Cache read',
-      cacheWrite: 'Cache write',
-      reasoning: 'Reasoning',
-      cacheHitRate: 'Cache hit rate',
-      trend: 'Daily trend',
-      dayUnit: 'd',
-      byModel: 'By model',
-      byDay: 'By day',
-      model: 'Model',
-      day: 'Date',
-      share: 'Share',
+      lifetimeTotalTokens: 'Total tokens',
+      lifetimePeakTokens: 'Peak day',
+      longestSession: 'Longest session',
+      currentStreak: 'Current streak',
+      longestStreak: 'Longest streak',
+      heatmapTitle: 'Token activity',
+      heatmapDaily: 'Daily',
+      heatmapWeekly: 'Weekly',
+      heatmapCumulative: 'Cumulative',
+      heatmapLess: 'Less',
+      heatmapMore: 'More',
+      heatmapCell: '{date}\n{tokens} tokens · {calls} calls',
+      heatmapWeeklyCell: 'Week of {date}\n{tokens} tokens · {calls} calls',
+      heatmapCumulativeCell: 'Cumulative through {date}\n{tokens} tokens · {calls} calls',
+      rangeTitle: 'Time range',
+      range7d: 'Last 7 days',
+      range30d: 'Last 30 days',
+      dailyChartTitle: 'Daily token trend',
+      modelChartTitle: 'Model usage',
+      otherModel: 'Other models',
+      unattributed: 'Unattributed',
+      unknownModel: 'Unknown model',
+      tokenUnit: 'tokens',
+      emptyTitle: 'Nothing to show yet',
+      emptyDescription: 'Send one model message and come back.',
+      emptyRange: 'No usage in this range.',
+      loading: 'Loading…',
       refresh: 'Refresh',
       reset: 'Reset',
-      confirmReset: 'Reset all accumulated token usage? This cannot be undone. Your prices are kept.',
-      loading: 'Loading…',
-      empty: 'No records yet. Send one model message and come back.',
+      confirmReset: 'Reset all accumulated usage? This cannot be undone; a snapshot is taken first.',
+      resetDone: 'Cleared',
       file: 'Data file',
       since: 'Counting since',
       updated: 'Last updated',
+      build: 'Build',
       failed: 'Load failed: ',
-      expand: 'Show all',
-      collapse: 'Collapse',
-      cost: 'Cost',
-      costTitle: 'Estimated cost',
-      totalCost: 'Total cost',
-      costNote: 'Estimated from the prices you enter below. Models without a price are excluded.',
-      priced: 'Priced',
-      unpriced: 'No price',
-      partialPrice: 'Partial price',
-      priceTitle: 'Model prices',
-      priceHint: 'Unit: CNY per million tokens. Leave a field empty to skip it; leave all empty to exclude the model.',
-      priceUnit: '/ 1M tokens',
-      save: 'Save prices',
-      saving: 'Saving…',
-      saved: 'Prices saved',
-      resetPrices: 'Clear prices',
-      confirmResetPrices: 'Clear all model prices?',
-      priceInput: 'Input price',
-      priceOutput: 'Output price',
-      priceCacheRead: 'Cache read price',
-      priceCacheWrite: 'Cache write price',
-      costInput: 'Input cost',
-      costOutput: 'Output cost',
-      costCacheRead: 'Cache read cost',
-      costCacheWrite: 'Cache write cost',
-      priceEmpty: 'No model recorded yet. Send one message first, then set prices here.',
-      priceDirty: 'Unsaved changes',
-      priceSavedAt: 'Prices updated',
-      corruptBackup: 'The totals file was corrupt at last startup; backed up to',
-      restoredFrom: 'Totals restored from snapshot:',
+      corruptBackup: 'The usage file was corrupt at last startup; backed up to',
+      restoredFrom: 'Usage restored from snapshot:',
       resetBackup: 'The data cleared by reset was snapshotted to:',
-      resetDone: 'Cleared',
       staleTitle: 'An older build of the plugin is running',
       staleHint: 'index.js on disk is newer, but DSH still uses the version loaded at startup (Node caches imported modules). Fully quit and restart DSH Desktop, or the new behaviour will not apply.',
-      build: 'Build',
+      durationDay: 'd',
+      durationHour: 'h',
+      durationMinute: 'm',
+      durationSecond: 's',
     }
 
     // 由 apply 绑定的翻译函数；组件渲染时读取。
     let t = (key) => key
 
-    /** 构成条的固定段：推理通常已含在输出里，所以只入图例、不入堆叠。 */
-    const SEGMENTS = [
-      { key: 'inputTokens', label: 'input', tone: 'brand' },
-      { key: 'outputTokens', label: 'output', tone: 'success' },
-      { key: 'cacheReadTokens', label: 'cacheRead', tone: 'warn' },
-      { key: 'cacheWriteTokens', label: 'cacheWrite', tone: 'idle' },
-    ]
-
     const CSS = `
-.dshtu-root { display:flex; flex-direction:column; gap:12px; color:var(--dsw-alias-label-primary); font-size:13px; }
+.dshtu-root { display:flex; flex-direction:column; gap:14px; color:var(--dsw-alias-label-primary); font-size:12px; line-height:1.45; }
 .dshtu-root *, .dshtu-root *::before, .dshtu-root *::after { box-sizing:border-box; }
-
-.dshtu-head { display:flex; align-items:center; gap:8px; }
+.dshtu-head { display:flex; align-items:center; gap:8px; min-width:0; }
 .dshtu-title { margin:0; font-size:14px; font-weight:600; }
-.dshtu-spacer { flex:1 1 auto; }
 .dshtu-live { display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--dsw-alias-label-secondary); }
-.dshtu-dot { width:6px; height:6px; border-radius:50%; background:var(--dsw-alias-state-success-primary); animation:dshtu-pulse 1.8s ease-in-out infinite; }
-@keyframes dshtu-pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.35; transform:scale(.7); } }
-
-.dshtu-btn { height:26px; padding:0 10px; border-radius:8px; border:1px solid var(--dsw-alias-border-l2); background:transparent; color:var(--dsw-alias-label-secondary); font-size:12px; cursor:pointer; transition:color .15s, border-color .15s, background-color .15s; }
+.dshtu-dot { width:6px; height:6px; border-radius:50%; background:var(--dsw-alias-state-success-primary); animation:dshtu-pulse 2s ease-in-out infinite; }
+@keyframes dshtu-pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+.dshtu-spacer { flex:1 1 auto; }
+.dshtu-ok { color:var(--dsw-alias-state-success-primary); font-size:11px; }
+.dshtu-btn { height:26px; padding:0 10px; border-radius:8px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-1); color:var(--dsw-alias-label-secondary); font-size:12px; cursor:pointer; transition:color .15s, border-color .15s; }
 .dshtu-btn:hover:not([disabled]) { color:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
 .dshtu-btn[disabled] { opacity:.45; cursor:default; }
-.dshtu-btn.is-on { color:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); background:var(--dsw-alias-bg-layer-1); background:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); }
-.dshtu-seg { display:inline-flex; gap:2px; padding:2px; border-radius:9px; background:var(--dsw-alias-bg-layer-2); border:1px solid var(--dsw-alias-border-l1); }
-.dshtu-seg .dshtu-btn { height:22px; border-color:transparent; }
-
-.dshtu-card { position:relative; overflow:hidden; border:1px solid var(--dsw-alias-border-l1); border-radius:12px; background:var(--dsw-alias-bg-layer-2); padding:14px 16px; animation:dshtu-rise .4s cubic-bezier(.22,1,.36,1) both; }
-@keyframes dshtu-rise { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
-.dshtu-card::before { content:''; position:absolute; inset:0 0 auto 0; height:1px; background:linear-gradient(90deg, transparent, var(--dsw-alias-border-l2), transparent); background:linear-gradient(90deg, transparent, color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, transparent), transparent); }
-.dshtu-hero { display:flex; align-items:center; gap:16px; }
-.dshtu-hero-main { flex:1 1 auto; min-width:0; }
-.dshtu-eyebrow { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dsw-alias-label-secondary); }
-.dshtu-total { margin:2px 0 6px; font-size:32px; line-height:1.1; font-weight:700; font-variant-numeric:tabular-nums; background:linear-gradient(96deg, var(--dsw-alias-brand-primary), var(--dsw-alias-state-success-primary)); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; color:var(--dsw-alias-brand-primary); }
-.dshtu-sub { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:11px; color:var(--dsw-alias-label-secondary); }
-.dshtu-sub b { color:var(--dsw-alias-label-primary); font-weight:600; font-variant-numeric:tabular-nums; }
-
-.dshtu-ring { position:relative; flex:0 0 auto; width:88px; height:88px; }
-.dshtu-ring svg { display:block; transform:rotate(-90deg); }
-.dshtu-ring-track { fill:none; stroke:var(--dsw-alias-border-l1); stroke-width:8; }
-.dshtu-ring-value { fill:none; stroke:var(--dsw-alias-brand-primary); stroke-width:8; stroke-linecap:round; transition:stroke-dashoffset .7s cubic-bezier(.22,1,.36,1); }
-.dshtu-ring-text { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; }
-.dshtu-ring-num { font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; }
-.dshtu-ring-cap { font-size:9px; color:var(--dsw-alias-label-secondary); text-align:center; line-height:1.1; }
-
-.dshtu-stack { display:flex; gap:2px; height:12px; border-radius:6px; overflow:hidden; background:var(--dsw-alias-bg-base); }
-.dshtu-fill { transform-origin:left center; animation:dshtu-fill .55s cubic-bezier(.22,1,.36,1) both; }
-@keyframes dshtu-fill { from { transform:scaleX(0); } to { transform:scaleX(1); } }
-.dshtu-legend { display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:10px; }
-.dshtu-legend-item { display:flex; align-items:baseline; gap:6px; font-size:11px; color:var(--dsw-alias-label-secondary); }
-.dshtu-legend-item b { font-size:13px; color:var(--dsw-alias-label-primary); font-variant-numeric:tabular-nums; }
-.dshtu-swatch { width:8px; height:8px; border-radius:3px; flex:0 0 auto; align-self:center; }
-.dshtu-tone-brand { background:var(--dsw-alias-brand-primary); }
-.dshtu-tone-success { background:var(--dsw-alias-state-success-primary); }
-.dshtu-tone-warn { background:var(--dsw-alias-state-warn-primary); }
-.dshtu-tone-idle { background:var(--dsw-alias-state-idle-primary); }
-.dshtu-tone-muted { background:var(--dsw-alias-border-l2); }
-
-.dshtu-section-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
-.dshtu-section-title { margin:0; font-size:12px; font-weight:600; }
-.dshtu-count { font-size:11px; color:var(--dsw-alias-label-secondary); }
-
-.dshtu-chart { width:100%; height:auto; display:block; }
-.dshtu-bar { transform-box:fill-box; transform-origin:bottom; animation:dshtu-grow .5s cubic-bezier(.22,1,.36,1) both; }
-@keyframes dshtu-grow { from { transform:scaleY(0); } to { transform:scaleY(1); } }
-.dshtu-bar-base { fill:var(--dsw-alias-border-l2); }
-.dshtu-bar-fill { fill:var(--dsw-alias-brand-primary); fill:color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent); }
-.dshtu-bar-today { fill:var(--dsw-alias-brand-primary); }
-.dshtu-bar-peak { fill:var(--dsw-alias-state-success-primary); }
-.dshtu-tick { font-size:9px; fill:var(--dsw-alias-label-secondary); }
-.dshtu-axis { stroke:var(--dsw-alias-border-l1); stroke-width:1; }
-
-.dshtu-table-wrap { overflow-x:auto; }
-.dshtu-table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
-.dshtu-table th { text-align:right; font-weight:500; font-size:11px; color:var(--dsw-alias-label-secondary); padding:5px 6px; border-bottom:1px solid var(--dsw-alias-border-l1); white-space:nowrap; }
-.dshtu-table td { text-align:right; padding:6px; border-bottom:1px solid var(--dsw-alias-border-l1); white-space:nowrap; }
-.dshtu-table th:first-child, .dshtu-table td:first-child { text-align:left; width:100%; }
-.dshtu-table tbody tr:hover td { background:var(--dsw-alias-bg-layer-2); background:color-mix(in srgb, var(--dsw-alias-brand-primary) 7%, transparent); }
-.dshtu-table tbody tr:last-child td { border-bottom:none; }
-.dshtu-model { display:flex; flex-direction:column; gap:3px; min-width:0; }
-.dshtu-model-name { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.dshtu-model-meta { display:flex; align-items:center; gap:6px; }
-.dshtu-badge { font-size:9px; padding:0 5px; height:14px; line-height:14px; border-radius:7px; color:var(--dsw-alias-label-secondary); background:var(--dsw-alias-bg-base); border:1px solid var(--dsw-alias-border-l1); }
-.dshtu-share { flex:1 1 auto; height:3px; min-width:24px; border-radius:2px; background:var(--dsw-alias-bg-base); overflow:hidden; }
-.dshtu-share > i { display:block; height:100%; background:var(--dsw-alias-brand-primary); transform-origin:left center; animation:dshtu-fill .55s cubic-bezier(.22,1,.36,1) both; }
-.dshtu-empty { font-size:12px; color:var(--dsw-alias-label-secondary); }
-.dshtu-error { font-size:12px; color:var(--dsw-alias-state-error-primary); }
-.dshtu-foot { font-size:11px; color:var(--dsw-alias-label-secondary); word-break:break-all; }
-
-/* 费用 */
-.dshtu-money { font-variant-numeric:tabular-nums; }
-.dshtu-cost-main { display:flex; align-items:flex-end; gap:8px; }
-.dshtu-cost-num { font-size:28px; line-height:1.1; font-weight:700; font-variant-numeric:tabular-nums; color:var(--dsw-alias-state-success-primary); }
-.dshtu-cost-num.is-unknown { color:var(--dsw-alias-label-secondary); font-size:20px; }
-.dshtu-cost-unit { font-size:11px; color:var(--dsw-alias-label-secondary); padding-bottom:4px; }
-.dshtu-cost-body { display:flex; flex-wrap:wrap; gap:12px 28px; margin-top:10px; }
-.dshtu-cost-item { display:flex; flex-direction:column; gap:2px; font-size:11px; color:var(--dsw-alias-label-secondary); }
-.dshtu-cost-item b { font-size:13px; color:var(--dsw-alias-label-primary); font-variant-numeric:tabular-nums; }
-.dshtu-cost-item i { font-style:normal; font-size:10px; color:var(--dsw-alias-label-secondary); }
-.dshtu-note { margin-top:10px; font-size:11px; color:var(--dsw-alias-label-secondary); }
-.dshtu-warn { color:var(--dsw-alias-state-warn-primary); }
-.dshtu-ok { color:var(--dsw-alias-state-success-primary); }
-
-/* 单价编辑 */
-.dshtu-price-input { width:88px; height:24px; padding:0 6px; border-radius:6px; font-size:12px; font-variant-numeric:tabular-nums; text-align:right; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-base); color:var(--dsw-alias-label-primary); }
-.dshtu-price-input:focus { outline:none; border-color:var(--dsw-alias-brand-primary); }
-.dshtu-price-input::placeholder { color:var(--dsw-alias-label-secondary); }
-.dshtu-price-unit { margin-left:4px; font-size:10px; color:var(--dsw-alias-label-secondary); }
-.dshtu-price-cell { display:flex; align-items:center; justify-content:flex-end; }
-.dshtu-actions { display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap; }
-.dshtu-btn.is-primary { color:var(--dsw-alias-bg-base); border-color:var(--dsw-alias-brand-primary); background:var(--dsw-alias-brand-primary); }
-.dshtu-btn.is-primary:hover:not([disabled]) { color:var(--dsw-alias-bg-base); opacity:.86; }
-
-/* 旧代码横幅：不是报错，是「你改的东西还没生效」，所以用警示色而非错误色 */
-.dshtu-banner { display:flex; flex-direction:column; gap:3px; padding:10px 12px; border-radius:10px; border:1px solid var(--dsw-alias-state-warn-primary); background:var(--dsw-alias-bg-layer-2); background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); font-size:11px; line-height:1.5; }
+.dshtu-btn.is-primary { color:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }
+.dshtu-tabs { display:inline-flex; flex:0 0 auto; gap:2px; padding:2px; border-radius:999px; background:color-mix(in srgb, var(--dsw-alias-label-secondary) 12%, transparent); }
+.dshtu-tab { height:22px; padding:0 10px; border:0; border-radius:999px; background:transparent; color:var(--dsw-alias-label-secondary); font-size:11px; line-height:22px; cursor:pointer; }
+.dshtu-tab.is-on { background:var(--dsw-alias-bg-layer-1); color:var(--dsw-alias-label-primary); }
+.dshtu-card { min-width:0; padding:14px 16px; border:1px solid var(--dsw-alias-border-l2); border-radius:12px; background:color-mix(in srgb, var(--dsw-alias-label-primary) 3%, transparent); }
+.dshtu-card-head { display:flex; align-items:center; gap:10px; min-width:0; margin-bottom:10px; }
+.dshtu-card-title { margin:0; font-size:12px; font-weight:600; }
+.dshtu-strip { display:flex; overflow:hidden; border:1px solid var(--dsw-alias-border-l2); border-radius:12px; background:color-mix(in srgb, var(--dsw-alias-label-primary) 3%, transparent); }
+.dshtu-strip-cell { flex:1 1 0; min-width:0; padding:12px 10px; text-align:center; }
+.dshtu-strip-cell + .dshtu-strip-cell { border-left:1px solid var(--dsw-alias-border-l2); }
+.dshtu-strip-value { overflow:hidden; font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+.dshtu-strip-label { overflow:hidden; margin-top:4px; font-size:11px; color:var(--dsw-alias-label-secondary); text-overflow:ellipsis; white-space:nowrap; }
+.dshtu-heatmap-grid { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:2px; }
+.dshtu-heatmap-col { display:grid; grid-template-rows:repeat(7, auto); gap:2px; min-width:0; }
+.dshtu-heatmap-cell { width:100%; aspect-ratio:1 / 1; border-radius:3px; background:color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent); }
+.dshtu-heatmap-cell[data-level="1"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 26%, transparent); }
+.dshtu-heatmap-cell[data-level="2"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 44%, transparent); }
+.dshtu-heatmap-cell[data-level="3"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 66%, transparent); }
+.dshtu-heatmap-cell[data-level="4"] { background:var(--dsw-alias-brand-primary); }
+.dshtu-heatmap-cell.is-empty { background:transparent; }
+.dshtu-heatmap-months { display:grid; grid-template-columns:repeat(52, minmax(0,1fr)); gap:2px; margin-top:6px; }
+.dshtu-month-label { overflow:hidden; font-size:10px; color:var(--dsw-alias-label-secondary); white-space:nowrap; }
+.dshtu-heat-legend { display:flex; align-items:center; justify-content:flex-end; gap:4px; margin-top:8px; font-size:10px; color:var(--dsw-alias-label-secondary); }
+.dshtu-heat-legend-cell { width:9px; height:9px; border-radius:2px; background:color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, transparent); }
+.dshtu-heat-legend-cell[data-level="1"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 26%, transparent); }
+.dshtu-heat-legend-cell[data-level="2"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 44%, transparent); }
+.dshtu-heat-legend-cell[data-level="3"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 66%, transparent); }
+.dshtu-heat-legend-cell[data-level="4"] { background:var(--dsw-alias-brand-primary); }
+.dshtu-range-row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+.dshtu-range-title { font-size:12px; font-weight:500; }
+.dshtu-chart-legend { display:flex; flex-wrap:wrap; gap:4px 12px; margin-bottom:8px; }
+.dshtu-legend-item { display:inline-flex; align-items:center; gap:6px; min-width:0; font-size:11px; color:var(--dsw-alias-label-secondary); }
+.dshtu-legend-name { overflow:hidden; max-width:150px; text-overflow:ellipsis; white-space:nowrap; }
+.dshtu-chart-wrap { position:relative; }
+.dshtu-chart { display:block; width:100%; height:auto; }
+.dshtu-grid-line { stroke:var(--dsw-alias-border-l1); stroke-dasharray:3 3; stroke-width:1; }
+.dshtu-axis-label { font-size:10px; fill:var(--dsw-alias-label-secondary); }
+.dshtu-line { fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+.dshtu-line-0 { stroke:var(--dsw-alias-brand-primary); }
+.dshtu-line-1 { stroke:var(--dsw-alias-state-success-primary); }
+.dshtu-line-2 { stroke:var(--dsw-alias-state-warn-primary); }
+.dshtu-line-3 { stroke:var(--dsw-alias-state-business-primary); }
+.dshtu-line-4 { stroke:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-state-success-primary)); }
+.dshtu-line-5 { stroke:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 60%, var(--dsw-alias-state-business-primary)); }
+.dshtu-hover-line { stroke:var(--dsw-alias-border-l2); stroke-width:1; }
+.dshtu-hover-dot { fill:var(--dsw-alias-bg-layer-1); stroke-width:2; }
+.dshtu-tooltip { position:absolute; top:6px; z-index:3; min-width:132px; max-width:220px; padding:8px 10px; border:1px solid var(--dsw-alias-border-l1); border-radius:8px; background:var(--dsw-alias-tooltip-bg); color:var(--dsw-alias-label-primary); box-shadow:0 6px 18px var(--dsw-alias-bg-mask-1); pointer-events:none; }
+.dshtu-tip-title { margin-bottom:6px; font-size:11px; color:var(--dsw-alias-label-secondary); }
+.dshtu-tip-row { display:flex; align-items:center; gap:6px; font-size:11px; line-height:1.6; }
+.dshtu-tip-name { flex:1 1 auto; min-width:0; overflow:hidden; color:var(--dsw-alias-label-secondary); text-overflow:ellipsis; white-space:nowrap; }
+.dshtu-tip-value { font-variant-numeric:tabular-nums; }
+.dshtu-donut-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; align-items:center; }
+.dshtu-donut-wrap { position:relative; width:100%; max-width:230px; margin:0 auto; }
+.dshtu-donut { display:block; width:100%; height:auto; }
+.dshtu-donut-center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; pointer-events:none; }
+.dshtu-donut-total { font-size:15px; font-weight:600; font-variant-numeric:tabular-nums; }
+.dshtu-donut-unit { font-size:10px; color:var(--dsw-alias-label-secondary); }
+.dshtu-ring-slice { fill:none; stroke-width:22; }
+.dshtu-slice-0 { stroke:var(--dsw-alias-brand-primary); }
+.dshtu-slice-1 { stroke:var(--dsw-alias-state-success-primary); }
+.dshtu-slice-2 { stroke:var(--dsw-alias-state-warn-primary); }
+.dshtu-slice-3 { stroke:var(--dsw-alias-state-business-primary); }
+.dshtu-slice-4 { stroke:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-state-success-primary)); }
+.dshtu-slice-5 { stroke:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 60%, var(--dsw-alias-state-business-primary)); }
+.dshtu-model-list { min-width:0; }
+.dshtu-model-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:2px 8px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l1); }
+.dshtu-model-row:last-child { border-bottom:none; }
+.dshtu-model-name { overflow:hidden; font-family:var(--ds-font-family-code); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.dshtu-model-share { font-size:11px; color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
+.dshtu-model-meta { grid-column:2; font-size:11px; color:var(--dsw-alias-label-secondary); }
+.dshtu-swatch { flex:0 0 auto; width:8px; height:8px; border-radius:2px; }
+.dshtu-swatch-0 { background:var(--dsw-alias-brand-primary); }
+.dshtu-swatch-1 { background:var(--dsw-alias-state-success-primary); }
+.dshtu-swatch-2 { background:var(--dsw-alias-state-warn-primary); }
+.dshtu-swatch-3 { background:var(--dsw-alias-state-business-primary); }
+.dshtu-swatch-4 { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-state-success-primary)); }
+.dshtu-swatch-5 { background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 60%, var(--dsw-alias-state-business-primary)); }
+.dshtu-empty { padding:22px 8px; border:1px dashed var(--dsw-alias-border-l1); border-radius:10px; color:var(--dsw-alias-label-secondary); font-size:12px; text-align:center; }
+.dshtu-error { padding:8px 10px; border-radius:8px; background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); color:var(--dsw-alias-state-error-primary); font-size:11px; word-break:break-word; }
+.dshtu-note { margin-top:8px; color:var(--dsw-alias-label-secondary); font-size:11px; line-height:1.5; word-break:break-all; }
+.dshtu-note.is-warn { color:var(--dsw-alias-state-warn-primary); }
+.dshtu-note.is-ok { color:var(--dsw-alias-state-success-primary); }
+.dshtu-banner { display:flex; flex-direction:column; gap:3px; padding:10px 12px; border:1px solid var(--dsw-alias-state-warn-primary); border-radius:10px; background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); font-size:11px; line-height:1.5; }
 .dshtu-banner b { font-size:12px; color:var(--dsw-alias-state-warn-primary); }
 .dshtu-banner span { color:var(--dsw-alias-label-secondary); }
+.dshtu-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; }
+.dshtu-foot { color:var(--dsw-alias-label-secondary); font-size:10px; line-height:1.6; word-break:break-all; }
+@media (max-width:720px) { .dshtu-donut-grid { grid-template-columns:minmax(0,1fr); } }
+@media (max-width:560px) { .dshtu-strip { flex-wrap:wrap; } .dshtu-strip-cell { flex:1 1 45%; } .dshtu-strip-cell + .dshtu-strip-cell { border-left:none; } }
 `
 
-    function formatNumber(value) {
-      const number = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : 0
-      return number.toLocaleString()
+    // ---- 格式化：数字 / 日期 / 时长 ----
+
+    /** 当前界面语言：locale 服务会把 <html lang> 同步成 zh-CN / en，读它最省事。 */
+    function activeLocale() {
+      try {
+        const lang = typeof document !== 'undefined' ? document.documentElement?.lang : ''
+        if (typeof lang === 'string' && lang !== '') return lang
+      } catch {
+        /* 无 DOM 时回落到 navigator */
+      }
+      try {
+        if (typeof navigator !== 'undefined' && typeof navigator.language === 'string') return navigator.language
+      } catch {
+        /* 忽略 */
+      }
+      return 'en'
     }
 
-    function formatTime(value) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+    function isZh() {
+      return /^zh/i.test(activeLocale())
+    }
+
+    // Intl 的格式化器实例化很贵，而热力图一屏要格式化几百个日期与数字：
+    // 必须按「语言 + 选项」缓存，否则每次切模式/重渲染都会卡住主线程。
+    const numberFormatters = new Map()
+    const dateFormatters = new Map()
+
+    function numberFormat(options) {
+      const locale = activeLocale()
+      const key = `${locale}|${JSON.stringify(options)}`
+      let formatter = numberFormatters.get(key)
+      if (formatter === undefined) {
+        try {
+          formatter = new Intl.NumberFormat(locale, options)
+        } catch {
+          formatter = null
+        }
+        numberFormatters.set(key, formatter)
+      }
+      return formatter
+    }
+
+    function dateFormat(options) {
+      const locale = activeLocale()
+      const key = `${locale}|${JSON.stringify(options)}`
+      let formatter = dateFormatters.get(key)
+      if (formatter === undefined) {
+        try {
+          formatter = new Intl.DateTimeFormat(locale, options)
+        } catch {
+          formatter = null
+        }
+        dateFormatters.set(key, formatter)
+      }
+      return formatter
+    }
+
+    /** 精确整数：调用次数、天数这类不需要缩写。 */
+    function formatCount(value) {
+      const number = Number(value)
+      const safe = Number.isFinite(number) ? Math.round(number) : 0
+      const formatter = numberFormat({ maximumFractionDigits: 0 })
+      return formatter === null ? String(safe) : formatter.format(safe)
+    }
+
+    /** 紧凑 token 数：中文万/亿、英文 K/M/B（与 ZCode 的 compact 口径一致）。 */
+    function formatCompact(value) {
+      const number = Number(value)
+      const safe = Number.isFinite(number) ? number : 0
+      const formatter = numberFormat({
+        notation: Math.abs(safe) >= 1000 ? 'compact' : 'standard',
+        maximumFractionDigits: 1,
+        minimumFractionDigits: 0,
+      })
+      if (formatter === null) return String(Math.round(safe))
+      const text = formatter.format(safe)
+      // 中文 compact 会把单位直接贴在数字后；摘要里留个空格，和时长、天数对齐。
+      return isZh() ? text.replace(/(?<=\d)(?=[万亿])/u, ' ') : text
+    }
+
+    function formatPercent(value) {
+      const number = Number(value)
+      const safe = Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0
+      const formatter = numberFormat({ style: 'percent', maximumFractionDigits: safe >= 0.1 ? 0 : 1 })
+      return formatter === null ? `${Math.round(safe * 100)}%` : formatter.format(safe)
+    }
+
+    function parseDay(dateKey) {
+      if (typeof dateKey !== 'string' || dateKey.length < 10) return null
+      const date = new Date(`${dateKey.slice(0, 10)}T00:00:00.000Z`)
+      return Number.isNaN(date.getTime()) ? null : date
+    }
+
+    /** 图表横轴：月/日；热力图 tooltip：完整日期。 */
+    function formatDayShort(dateKey) {
+      const date = parseDay(dateKey)
+      if (date === null) return String(dateKey ?? '')
+      const formatter = dateFormat({ month: 'numeric', day: 'numeric', timeZone: 'UTC' })
+      return formatter === null ? dateKey : formatter.format(date)
+    }
+
+    function formatDayFull(dateKey) {
+      const date = parseDay(dateKey)
+      if (date === null) return String(dateKey ?? '')
+      const formatter = dateFormat({ year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })
+      return formatter === null ? dateKey : formatter.format(date)
+    }
+
+    function formatMonth(dateKey) {
+      const date = parseDay(dateKey)
+      if (date === null) return ''
+      const formatter = dateFormat({ month: 'short', timeZone: 'UTC' })
+      return formatter === null ? '' : formatter.format(date)
+    }
+
+    /** 模板占位替换：`{date}` 这类短占位比拼字符串更适合双语。 */
+    function fill(template, values) {
+      return String(template).replace(/\{(\w+)\}/g, (match, key) => (key in values ? String(values[key]) : match))
+    }
+
+    function formatDuration(ms) {
+      const total = Number(ms)
+      if (!Number.isFinite(total) || total <= 0) return '—'
+      let rest = total
+      const parts = []
+      for (const unit of DURATION_UNITS) {
+        const count = Math.floor(rest / unit.ms)
+        if (count > 0) {
+          parts.push(`${formatCount(count)} ${t(unit.key)}`)
+          rest -= count * unit.ms
+        }
+      }
+      return parts.length === 0 ? `0 ${t('durationMinute')}` : parts.join(' ')
+    }
+
+    function formatStamp(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '—'
       try {
         return new Date(value).toLocaleString()
       } catch {
@@ -303,586 +388,545 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * 金额格式化：小额多留几位，避免 ¥0.00 看不出差别。
-     * @param value - 金额（元）。
-     */
-    function formatMoney(value) {
-      const number = typeof value === 'number' && Number.isFinite(value) ? value : 0
-      if (number === 0) return '0.00'
-      const abs = Math.abs(number)
-      const digits = abs < 0.01 ? 4 : 2
-      return number.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
+    // ---- 图表计算 ----
+
+    function modelLabel(row) {
+      if (row?.key === OTHER_KEY) return t('unattributed')
+      const name = typeof row?.model === 'string' ? row.model.trim() : ''
+      return name === '' ? t('unknownModel') : name
     }
 
-    /** 单价复用金额格式：填了 0 就显示 0，留空由调用方处理。 */
-    function formatRate(value) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return ''
-      return String(value)
+    function levelFor(value, max) {
+      if (!(value > 0) || !(max > 0)) return 0
+      return Math.min(4, Math.max(1, Math.ceil((value / max) * 4)))
     }
 
-    /** 从一行模型统计里取费用对象（Host 未返回时给一个全 0 的兜底）。 */
-    function costOf(row) {
-      const cost = row?.cost
-      if (cost !== null && typeof cost === 'object') return cost
-      return { known: false, partial: false, total: 0, items: {} }
-    }
-
-    function pad2(value) {
-      return String(value).padStart(2, '0')
-    }
-
-    /** 最近 n 个本地自然日的 key，升序。 */
-    function recentDayKeys(n) {
-      const keys = []
-      const now = new Date()
-      for (let offset = n - 1; offset >= 0; offset -= 1) {
-        const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)
-        keys.push(`${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`)
+    /** 热力图网格：把 52 周的每日格子按模式换算成「列 × 7 行」的显示数据。 */
+    function buildHeatmapColumns(weeks, mode) {
+      const weekly = weeks.map((week) => (week.days ?? []).reduce((sum, cell) => sum + (cell?.totalTokens ?? 0), 0))
+      const calls = weeks.map((week) => (week.days ?? []).reduce((sum, cell) => sum + (cell?.calls ?? 0), 0))
+      const cumulative = []
+      let running = 0
+      for (const value of weekly) {
+        running += value
+        cumulative.push(running)
       }
-      return keys
-    }
-
-    /** 把 /stats 的按天数组补成连续 n 天，升序。 */
-    function buildSeries(days, n) {
-      const byDay = new Map()
-      for (const row of days) byDay.set(row.day, row)
-      return recentDayKeys(n).map((day) => ({ day, row: byDay.get(day) ?? null, value: byDay.get(day)?.totalTokens ?? 0 }))
-    }
-
-    /** 从 0 滚到目标值的数字动画。 */
-    function useCountUp(value) {
-      const target = typeof value === 'number' && Number.isFinite(value) ? value : 0
-      const [display, setDisplay] = React.useState(target)
-      const fromRef = React.useRef(target)
-      React.useEffect(() => {
-        const from = fromRef.current
-        if (from === target) return undefined
-        let frame = 0
-        const started = Date.now()
-        const step = () => {
-          const progress = Math.min(1, (Date.now() - started) / 600)
-          const eased = 1 - Math.pow(1 - progress, 3)
-          setDisplay(from + (target - from) * eased)
-          if (progress < 1) frame = requestAnimationFrame(step)
-          else fromRef.current = target
+      // 每日和每周/累计的「最大格」不是同一个量纲：混用会让每日视图几乎全是最浅色。
+      const maxDaily = weeks.reduce((max, week) => (week.days ?? []).reduce((inner, cell) => Math.max(inner, cell?.totalTokens ?? 0), max), 0)
+      const weeklyValues = mode === 'cumulative' ? cumulative : weekly
+      const maxWeekly = Math.max(0, ...weeklyValues)
+      return weeks.map((week, weekIndex) => {
+        const days = week.days ?? []
+        const monthDate = monthDateOf(days)
+        const lastDate = days.filter(Boolean).at(-1)?.date ?? ''
+        if (mode === 'daily') {
+          const cells = days.map((cell, dayOffset) => {
+            if (cell === null || cell === undefined) return { key: `e-${weekIndex}-${dayOffset}`, level: 0, empty: true, title: undefined }
+            return {
+              key: cell.date,
+              level: levelFor(cell.totalTokens, maxDaily),
+              empty: false,
+              title: fill(t('heatmapCell'), {
+                date: formatDayFull(cell.date),
+                tokens: formatCompact(cell.totalTokens),
+                calls: formatCount(cell.calls),
+              }),
+            }
+          })
+          return { key: `week-${weekIndex}`, monthDate, cells }
         }
-        frame = requestAnimationFrame(step)
-        return () => cancelAnimationFrame(frame)
-      }, [target])
-      return display
-    }
-
-    /** 挂载后翻一次，让圆环/进度条从 0 过渡到真实值。 */
-    function useMounted() {
-      const [mounted, setMounted] = React.useState(false)
-      React.useEffect(() => {
-        const frame = requestAnimationFrame(() => setMounted(true))
-        return () => cancelAnimationFrame(frame)
-      }, [])
-      return mounted
-    }
-
-    function CacheRing({ ratio, mounted }) {
-      const { size, radius, width } = RINGS
-      const center = size / 2
-      const circumference = 2 * Math.PI * radius
-      const safe = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0
-      const offset = mounted ? circumference * (1 - safe) : circumference
-      return h(
-        'div',
-        { className: 'dshtu-ring' },
-        h(
-          'svg',
-          { width: size, height: size, viewBox: `0 0 ${size} ${size}`, 'aria-hidden': true },
-          h('circle', { className: 'dshtu-ring-track', cx: center, cy: center, r: radius, strokeWidth: width }),
-          h('circle', {
-            className: 'dshtu-ring-value',
-            cx: center,
-            cy: center,
-            r: radius,
-            strokeWidth: width,
-            strokeDasharray: circumference,
-            strokeDashoffset: offset,
-          }),
-        ),
-        h(
-          'div',
-          { className: 'dshtu-ring-text' },
-          h('span', { className: 'dshtu-ring-num' }, `${Math.round(safe * 100)}%`),
-          h('span', { className: 'dshtu-ring-cap' }, t('cacheHitRate')),
-        ),
-      )
-    }
-
-    function TrendChart({ series, range }) {
-      const width = 600
-      const plot = 100
-      const slot = width / series.length
-      const barWidth = Math.max(3, Math.min(slot * 0.56, 30))
-      const peak = series.reduce((max, item) => (item.value > max ? item.value : max), 0)
-      const safePeak = peak > 0 ? peak : 1
-      const stride = Math.ceil(series.length / 14)
-      const lastIndex = series.length - 1
-      const children = [
-        h('line', { key: 'axis', className: 'dshtu-axis', x1: 0, y1: plot, x2: width, y2: plot }),
-      ]
-      series.forEach((item, index) => {
-        const height = item.value > 0 ? Math.max(2, (item.value / safePeak) * (plot - 8)) : 0
-        const x = index * slot + (slot - barWidth) / 2
-        const isToday = index === lastIndex
-        const tone = item.value === 0 ? 'dshtu-bar-base' : isToday ? 'dshtu-bar-today' : item.value === peak ? 'dshtu-bar-peak' : 'dshtu-bar-fill'
-        children.push(
-          h(
-            'g',
-            { key: item.day },
-            h('rect', {
-              className: `dshtu-bar ${tone}`,
-              style: { animationDelay: `${Math.min(index * 18, 320)}ms` },
-              x,
-              y: item.value === 0 ? plot - 2 : plot - height,
-              width: barWidth,
-              height: item.value === 0 ? 2 : height,
-              rx: item.value === 0 ? 1 : Math.min(3, barWidth / 2),
-            }),
-            h('title', null, `${item.day} · ${formatNumber(item.value)} / ${item.row ? formatNumber(item.row.calls) : 0} ${t('calls')}`),
-          ),
-        )
-        if (index % stride === 0 || isToday) {
-          children.push(
-            h(
-              'text',
-              { key: `${item.day}-tick`, className: 'dshtu-tick', x: x + barWidth / 2, y: plot + 14, textAnchor: 'middle' },
-              item.day.slice(8),
-            ),
-          )
-        }
+        const value = weeklyValues[weekIndex] ?? 0
+        const level = levelFor(value, maxWeekly)
+        const filled = value <= 0 || maxWeekly <= 0 ? 0 : Math.min(7, Math.max(1, Math.ceil((value / maxWeekly) * 7)))
+        const title = fill(t(mode === 'weekly' ? 'heatmapWeeklyCell' : 'heatmapCumulativeCell'), {
+          date: formatDayFull(lastDate),
+          tokens: formatCompact(value),
+          calls: formatCount(calls[weekIndex] ?? 0),
+        })
+        const cells = days.map((cell, dayOffset) => {
+          const on = filled > 0 && dayOffset >= 7 - filled
+          return { key: `w-${weekIndex}-${dayOffset}`, level: on ? level : 0, empty: false, title: on || dayOffset === 0 ? title : undefined }
+        })
+        return { key: `week-${weekIndex}`, monthDate, cells }
       })
-      return h('svg', { className: 'dshtu-chart', viewBox: `0 0 ${width} ${plot + 20}`, role: 'img', 'aria-label': `${t('trend')} ${range}${t('dayUnit')}` }, children)
     }
 
-    /** 费用卡：总费用 + 四个计费项明细 + 未定价提示。 */
-    function CostCard({ data, models }) {
-      const totalCost = typeof data.totalCost === 'number' ? data.totalCost : 0
-      const priced = models.filter((row) => costOf(row).known)
-      const unpriced = models.filter((row) => !costOf(row).known)
-      // 明细按「所有已定价模型」逐项求和，而不是用总额推，口径才和按模型表一致。
-      const items = PRICE_FIELDS.map(({ field, label }) => {
-        let cost = 0
-        let tokens = 0
-        for (const row of priced) {
-          const item = costOf(row).items?.[field]
-          cost += item?.cost ?? 0
-          tokens += item?.tokens ?? row[`${field}Tokens`] ?? 0
+    /** 月份的锚点：周列里有 1 号就归到 1 号，否则用周里的第一天。 */
+    function monthDateOf(days) {
+      const firstOfMonth = days.find((cell) => cell !== null && cell !== undefined && cell.date.endsWith('-01'))
+      return firstOfMonth?.date ?? days.filter(Boolean)[0]?.date ?? ''
+    }
+
+    function buildMonthLabels(columns) {
+      const labels = []
+      for (const column of columns) {
+        const monthKey = column.monthDate.slice(0, 7)
+        const last = labels.at(-1)
+        if (last !== undefined && last.key === monthKey) {
+          last.span += 1
+        } else {
+          labels.push({ key: monthKey, label: formatMonth(column.monthDate), span: 1 })
         }
-        return { field, label, cost, tokens }
+      }
+      // 52 周可能横跨 13 个月；保留占位，只隐藏最早那几个的文字，最多显示 12 个。
+      const hidden = Math.max(0, labels.length - 12)
+      for (let index = 0; index < hidden; index += 1) labels[index].label = ''
+      return labels
+    }
+
+    /** 折线图数据：只画用量最高的 6 个模型，横轴补齐范围里的每一天。 */
+    function buildTrend(snapshot) {
+      const days = Array.isArray(snapshot?.dailyModelUsage) ? snapshot.dailyModelUsage : []
+      const models = (Array.isArray(snapshot?.models) ? snapshot.models : [])
+        .filter((row) => row.totalTokens > 0)
+        .slice(0, 6)
+      const series = models.map((model, index) => ({
+        key: model.key,
+        color: index,
+        label: modelLabel(model),
+      }))
+      const rows = days.map((day) => {
+        const values = {}
+        let total = 0
+        for (const entry of day.models ?? []) {
+          values[entry.key] = (values[entry.key] ?? 0) + entry.totalTokens
+          total += entry.totalTokens
+        }
+        return { date: day.date, total, values }
       })
-      const hasCost = priced.length > 0
-
-      return h(
-        'div',
-        { className: 'dshtu-card' },
-        h(
-          'div',
-          { className: 'dshtu-section-head' },
-          h('h4', { className: 'dshtu-section-title' }, t('costTitle')),
-          h('span', { className: 'dshtu-spacer' }),
-          h(
-            'span',
-            { className: 'dshtu-count' },
-            `${t('priced')} ${priced.length} / ${models.length}`,
-          ),
-        ),
-        h(
-          'div',
-          { className: 'dshtu-cost-main' },
-          h(
-            'span',
-            { className: `dshtu-cost-num${hasCost ? '' : ' is-unknown'}` },
-            hasCost ? `¥${formatMoney(totalCost)}` : t('unpriced'),
-          ),
-          hasCost ? h('span', { className: 'dshtu-cost-unit' }, 'CNY') : null,
-        ),
-        hasCost
-          ? h(
-              'div',
-              { className: 'dshtu-cost-body' },
-              items.map((item) =>
-                h(
-                  'div',
-                  { className: 'dshtu-cost-item', key: item.field },
-                  h('span', null, t(item.label)),
-                  h('b', null, `¥${formatMoney(item.cost)}`),
-                  h('i', null, `${formatNumber(item.tokens)} tok`),
-                ),
-              ),
-            )
-          : null,
-        h('div', { className: 'dshtu-note' }, t('costNote')),
-        unpriced.length > 0
-          ? h(
-              'div',
-              { className: 'dshtu-note dshtu-warn' },
-              `${t('unpriced')}：${unpriced.map((row) => row.model).join('、')}`,
-            )
-          : null,
-      )
+      let max = 0
+      for (const row of rows) {
+        for (const item of series) {
+          const value = row.values[item.key] ?? 0
+          if (value > max) max = value
+        }
+      }
+      return { series, rows, max }
     }
 
-    /**
-     * 单价编辑表：每个已出现过的模型四个输入框，改完统一保存。
-     *
-     * 输入框用字符串状态（'' 表示不计该项），所以组件内部维护 draft，保存成功后才回填。
-     * @param models - /stats 里的按模型统计。
-     * @param prices - Host 当前保存的单价表。
-     * @param onSave - 保存回调，收到清洗后的单价表。
-     * @param busy - 保存中，禁用按钮。
-     * @param savedAt - 上次保存时间，用于给出反馈。
-     */
-    function PriceEditor({ models, prices, onSave, busy, savedAt }) {
-      /** 把 Host 的单价表转成输入框用的字符串草稿。 */
-      const toDraft = (source) => {
-        const out = {}
-        for (const row of models) {
-          const price = (source ?? {})[row.key] ?? {}
-          const entry = {}
-          for (const { field } of PRICE_FIELDS) {
-            const value = price[field]
-            entry[field] = typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
-          }
-          out[row.key] = entry
-        }
-        return out
-      }
-
-      const [draft, setDraft] = React.useState(() => toDraft(prices))
-      // 记录草稿对应的价格版本；Host 回传新价格时（保存成功/刷新）才重置草稿，
-      // 否则用户正在输入的内容会被一次轮询覆盖掉。
-      const [base, setBase] = React.useState(() => JSON.stringify(prices ?? {}))
-      const [flash, setFlash] = React.useState(false)
-      const current = JSON.stringify(prices ?? {})
-      if (base !== current) {
-        setBase(current)
-        setDraft(toDraft(prices))
-      }
-
-      const setField = (key, field, value) => {
-        setDraft((previous) => ({ ...previous, [key]: { ...previous[key], [field]: value } }))
-      }
-
-      const dirty = JSON.stringify(draft) !== JSON.stringify(toDraft(prices))
-
-      const save = () => {
-        const payload = {}
-        for (const [key, entry] of Object.entries(draft)) {
-          const price = {}
-          for (const { field } of PRICE_FIELDS) {
-            const raw = String(entry[field] ?? '').trim()
-            if (raw === '') continue
-            const parsed = Number(raw)
-            if (!Number.isFinite(parsed) || parsed < 0) continue
-            price[field] = parsed
-          }
-          // 四项全空等于删除该模型的单价。
-          if (Object.keys(price).length > 0) payload[key] = price
-        }
-        onSave(payload)
-        setFlash(true)
-      }
-
-      React.useEffect(() => {
-        if (!flash) return undefined
-        const timer = setTimeout(() => setFlash(false), 2200)
-        return () => clearTimeout(timer)
-      }, [flash])
-
-      const clearAll = () => {
-        if (typeof window.confirm === 'function' && !window.confirm(t('confirmResetPrices'))) return
-        setDraft((previous) => {
-          const out = {}
-          for (const key of Object.keys(previous)) {
-            const entry = {}
-            for (const { field } of PRICE_FIELDS) entry[field] = ''
-            out[key] = entry
-          }
-          return out
+    /** 环形图切片：前 5 个模型 + 「其他模型」，最多 6 片。 */
+    function buildPie(models) {
+      const positive = (Array.isArray(models) ? models : []).filter((row) => row.totalTokens > 0)
+      const total = positive.reduce((sum, row) => sum + row.totalTokens, 0)
+      const limit = positive.length > MAX_PIE_SLICES ? MAX_PIE_SLICES - 1 : MAX_PIE_SLICES
+      const slices = positive.slice(0, limit).map((row, index) => ({
+        key: row.key,
+        color: index,
+        label: modelLabel(row),
+        totalTokens: row.totalTokens,
+        share: total > 0 ? row.totalTokens / total : 0,
+      }))
+      const rest = positive.slice(limit)
+      if (rest.length > 0) {
+        const value = rest.reduce((sum, row) => sum + row.totalTokens, 0)
+        slices.push({
+          key: MERGED_KEY,
+          color: limit,
+          label: t('otherModel'),
+          totalTokens: value,
+          share: total > 0 ? value / total : 0,
         })
       }
+      return { slices, total }
+    }
 
-      if (models.length === 0) {
-        return h(
+    // ---- 小组件 ----
+
+    function Tabs({ options, value, onChange }) {
+      return h(
+        'div',
+        { className: 'dshtu-tabs', role: 'tablist' },
+        options.map((option) =>
+          h(
+            'button',
+            {
+              key: option.key,
+              type: 'button',
+              role: 'tab',
+              'aria-selected': option.key === value,
+              className: `dshtu-tab${option.key === value ? ' is-on' : ''}`,
+              onClick: () => onChange(option.key),
+            },
+            option.label,
+          ),
+        ),
+      )
+    }
+
+    function EmptyState({ title, description }) {
+      return h('div', { className: 'dshtu-empty' }, title, description === undefined ? null : h('div', null, description))
+    }
+
+    function Swatch({ index }) {
+      return h('i', { className: `dshtu-swatch dshtu-swatch-${index}` })
+    }
+
+    // ---- 指标条 ----
+
+    function LifetimeStrip({ summary }) {
+      const items = [
+        { key: 'total', label: t('lifetimeTotalTokens'), value: summary === null ? '--' : formatCompact(summary.totalTokens) },
+        { key: 'peak', label: t('lifetimePeakTokens'), value: summary === null ? '--' : formatCompact(summary.peakDayTokens) },
+        { key: 'session', label: t('longestSession'), value: summary === null ? '--' : formatDuration(summary.longestSessionMs) },
+        { key: 'current', label: t('currentStreak'), value: summary === null ? '--' : `${formatCount(summary.currentStreakDays)} ${t('durationDay')}` },
+        { key: 'longest', label: t('longestStreak'), value: summary === null ? '--' : `${formatCount(summary.longestStreakDays)} ${t('durationDay')}` },
+      ]
+      return h(
+        'section',
+        { className: 'dshtu-strip', 'aria-label': t('title') },
+        items.map((item) =>
+          h(
+            'div',
+            { className: 'dshtu-strip-cell', key: item.key },
+            h('div', { className: 'dshtu-strip-value' }, item.value),
+            h('div', { className: 'dshtu-strip-label' }, item.label),
+          ),
+        ),
+      )
+    }
+
+    // ---- 热力图 ----
+
+    function HeatmapCard({ heatmap }) {
+      const [mode, setMode] = React.useState('daily')
+      const weeks = React.useMemo(() => (Array.isArray(heatmap?.weeks) ? heatmap.weeks : []), [heatmap])
+      const columns = React.useMemo(() => buildHeatmapColumns(weeks, mode), [weeks, mode])
+      const months = React.useMemo(() => buildMonthLabels(columns), [columns])
+      if (weeks.length === 0) return null
+      const tabs = HEATMAP_MODES.map((option) => ({ key: option, label: t(option === 'daily' ? 'heatmapDaily' : option === 'weekly' ? 'heatmapWeekly' : 'heatmapCumulative') }))
+
+      return h(
+        'section',
+        { className: 'dshtu-card' },
+        h(
           'div',
-          { className: 'dshtu-card' },
-          h('div', { className: 'dshtu-section-head' }, h('h4', { className: 'dshtu-section-title' }, t('priceTitle'))),
-          h('div', { className: 'dshtu-empty' }, t('priceEmpty')),
+          { className: 'dshtu-card-head' },
+          h('h4', { className: 'dshtu-card-title' }, t('heatmapTitle')),
+          h('span', { className: 'dshtu-spacer' }),
+          h(Tabs, { options: tabs, value: mode, onChange: setMode }),
+        ),
+        h(
+          'div',
+          { className: 'dshtu-heatmap-grid' },
+          columns.map((column) =>
+            h(
+              'div',
+              { className: 'dshtu-heatmap-col', key: column.key },
+              column.cells.map((cell) =>
+                h('div', {
+                  key: cell.key,
+                  className: `dshtu-heatmap-cell${cell.empty ? ' is-empty' : ''}`,
+                  'data-level': String(cell.level),
+                  title: cell.title,
+                }),
+              ),
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'dshtu-heatmap-months' },
+          months.map((month) => h('div', { key: month.key, className: 'dshtu-month-label', style: { gridColumn: `span ${month.span}` } }, month.label)),
+        ),
+        h(
+          'div',
+          { className: 'dshtu-heat-legend' },
+          h('span', null, t('heatmapLess')),
+          [1, 2, 3, 4].map((level) => h('i', { key: level, className: 'dshtu-heat-legend-cell', 'data-level': String(level) })),
+          h('span', null, t('heatmapMore')),
+        ),
+      )
+    }
+
+    // ---- 折线趋势 ----
+
+    const CHART = { width: 640, height: 200, padX: 26, padTop: 12, padBottom: 30 }
+
+    function TrendCard({ snapshot }) {
+      const [hover, setHover] = React.useState(-1)
+      const trend = React.useMemo(() => buildTrend(snapshot), [snapshot])
+      const { series, rows, max } = trend
+
+      let body
+      if (max <= 0) {
+        body = h(EmptyState, { title: t('emptyTitle'), description: t('emptyRange') })
+      } else {
+        const plotWidth = CHART.width - CHART.padX * 2
+        const plotHeight = CHART.height - CHART.padTop - CHART.padBottom
+        const step = rows.length > 1 ? plotWidth / (rows.length - 1) : 0
+        const xOf = (index) => CHART.padX + (rows.length > 1 ? index * step : plotWidth / 2)
+        const yOf = (value) => CHART.padTop + plotHeight - (Math.max(0, value) / max) * plotHeight
+        const labelStep = rows.length <= 14 ? 1 : rows.length > 45 ? 7 : 5
+        const children = []
+        for (let line = 0; line <= 3; line += 1) {
+          const y = CHART.padTop + (plotHeight / 3) * line
+          children.push(h('line', { key: `grid-${line}`, className: 'dshtu-grid-line', x1: CHART.padX, x2: CHART.width - CHART.padX, y1: y, y2: y }))
+        }
+        for (const item of series) {
+          let path = ''
+          for (let index = 0; index < rows.length; index += 1) {
+            const value = rows[index].values[item.key] ?? 0
+            path += `${index === 0 ? 'M' : 'L'}${xOf(index).toFixed(1)},${yOf(value).toFixed(1)}`
+          }
+          children.push(h('path', { key: `line-${item.key}`, className: `dshtu-line dshtu-line-${item.color}`, d: path }))
+        }
+        rows.forEach((row, index) => {
+          const showLabel = rows.length <= 14 ? true : index === 0 || index === rows.length - 1 || index % labelStep === 0
+          if (showLabel) {
+            children.push(
+              h('text', {
+                key: `label-${row.date}`,
+                className: 'dshtu-axis-label',
+                x: xOf(index),
+                y: CHART.height - 10,
+                textAnchor: 'middle',
+              }, formatDayShort(row.date)),
+            )
+          }
+        })
+        if (hover >= 0 && hover < rows.length) {
+          const row = rows[hover]
+          children.push(h('line', { key: 'hover-line', className: 'dshtu-hover-line', x1: xOf(hover), x2: xOf(hover), y1: CHART.padTop, y2: CHART.padTop + plotHeight }))
+          for (const item of series) {
+            const value = row.values[item.key] ?? 0
+            if (value <= 0) continue
+            children.push(h('circle', { key: `dot-${item.key}`, className: `dshtu-hover-dot dshtu-line-${item.color}`, cx: xOf(hover), cy: yOf(value), r: 4 }))
+          }
+        }
+        // 透明热区：每一列一个矩形，悬停只改 index，不做坐标换算，移动端也稳。
+        for (let index = 0; index < rows.length; index += 1) {
+          const width = plotWidth / Math.max(1, rows.length - 1)
+          children.push(
+            h('rect', {
+              key: `hit-${index}`,
+              x: xOf(index) - width / 2,
+              y: CHART.padTop,
+              width,
+              height: plotHeight,
+              fill: 'transparent',
+              onMouseEnter: () => setHover(index),
+              onMouseLeave: () => setHover(-1),
+            }),
+          )
+        }
+
+        const hoveredRow = hover >= 0 && hover < rows.length ? rows[hover] : null
+        const tooltip =
+          hoveredRow === null
+            ? null
+            : h(
+                'div',
+                {
+                  className: 'dshtu-tooltip',
+                  style: {
+                    left: `${(xOf(hover) / CHART.width) * 100}%`,
+                    transform: hover < 2 ? 'translateX(0)' : hover > rows.length - 3 ? 'translateX(-100%)' : 'translateX(-50%)',
+                  },
+                },
+                h('div', { className: 'dshtu-tip-title' }, `${formatDayShort(hoveredRow.date)} · ${formatCompact(hoveredRow.total)} ${t('tokenUnit')}`),
+                series
+                  .filter((item) => (hoveredRow.values[item.key] ?? 0) > 0)
+                  .sort((left, right) => (hoveredRow.values[right.key] ?? 0) - (hoveredRow.values[left.key] ?? 0))
+                  .map((item) =>
+                    h(
+                      'div',
+                      { className: 'dshtu-tip-row', key: item.key },
+                      h(Swatch, { index: item.color }),
+                      h('span', { className: 'dshtu-tip-name' }, item.label),
+                      h('span', { className: 'dshtu-tip-value' }, formatCompact(hoveredRow.values[item.key] ?? 0)),
+                    ),
+                  ),
+              )
+
+        body = h(
+          'div',
+          { className: 'dshtu-chart-wrap' },
+          h(
+            'svg',
+            {
+              className: 'dshtu-chart',
+              viewBox: `0 0 ${CHART.width} ${CHART.height}`,
+              role: 'img',
+              'aria-label': t('dailyChartTitle'),
+            },
+            children,
+          ),
+          tooltip,
         )
       }
 
-      const head = h(
-        'div',
-        { className: 'dshtu-section-head' },
-        h('h4', { className: 'dshtu-section-title' }, t('priceTitle')),
-        h('span', { className: 'dshtu-spacer' }),
-        dirty ? h('span', { className: 'dshtu-count dshtu-warn' }, t('priceDirty')) : null,
-        !dirty && flash ? h('span', { className: 'dshtu-count dshtu-ok' }, t('saved')) : null,
-        !dirty && !flash && savedAt > 0 ? h('span', { className: 'dshtu-count' }, `${t('priceSavedAt')} ${formatTime(savedAt)}`) : null,
-      )
-
       return h(
-        'div',
+        'section',
         { className: 'dshtu-card' },
-        head,
-        h('div', { className: 'dshtu-note' }, t('priceHint')),
-        h(
-          'div',
-          { className: 'dshtu-table-wrap' },
-          h(
-            'table',
-            { className: 'dshtu-table' },
-            h(
-              'thead',
-              null,
-              h(
-                'tr',
-                null,
-                h('th', { key: 'model' }, t('model')),
-                ...PRICE_FIELDS.map(({ field, label }) => h('th', { key: field }, t(label))),
+        h('div', { className: 'dshtu-card-head' }, h('h4', { className: 'dshtu-card-title' }, t('dailyChartTitle'))),
+        max <= 0
+          ? null
+          : h(
+              'div',
+              { className: 'dshtu-chart-legend' },
+              series.map((item) =>
+                h(
+                  'span',
+                  { className: 'dshtu-legend-item', key: item.key },
+                  h(Swatch, { index: item.color }),
+                  h('span', { className: 'dshtu-legend-name', title: item.label }, item.label),
+                ),
               ),
             ),
-            h(
-              'tbody',
-              null,
-              models.map((row) =>
+        body,
+      )
+    }
+
+    // ---- 模型环形图 ----
+
+    const DONUT = { size: 180, radius: 70, width: 22 }
+
+    function ModelCard({ snapshot }) {
+      const { slices, total } = React.useMemo(() => buildPie(snapshot?.models), [snapshot])
+      const center = DONUT.size / 2
+      const circumference = 2 * Math.PI * DONUT.radius
+      const gap = slices.length > 1 ? 2 : 0
+      let offset = 0
+      const rings = slices.map((slice) => {
+        const length = slice.share * circumference
+        const dash = Math.max(0, length - gap)
+        const ring = h('circle', {
+          key: slice.key,
+          className: `dshtu-ring-slice dshtu-slice-${slice.color}`,
+          cx: center,
+          cy: center,
+          r: DONUT.radius,
+          strokeWidth: DONUT.width,
+          strokeDasharray: `${dash} ${circumference - dash}`,
+          strokeDashoffset: -offset,
+          transform: `rotate(-90 ${center} ${center})`,
+        })
+        offset += length
+        return ring
+      })
+
+      return h(
+        'section',
+        { className: 'dshtu-card' },
+        h('div', { className: 'dshtu-card-head' }, h('h4', { className: 'dshtu-card-title' }, t('modelChartTitle'))),
+        total <= 0
+          ? h(EmptyState, { title: t('emptyTitle'), description: t('emptyRange') })
+          : h(
+              'div',
+              { className: 'dshtu-donut-grid' },
+              h(
+                'div',
+                { className: 'dshtu-donut-wrap' },
                 h(
-                  'tr',
-                  { key: row.key },
+                  'svg',
+                  { className: 'dshtu-donut', viewBox: `0 0 ${DONUT.size} ${DONUT.size}`, role: 'img', 'aria-label': t('modelChartTitle') },
+                  h('circle', { cx: center, cy: center, r: DONUT.radius, fill: 'none', stroke: 'var(--dsw-alias-border-l1)', strokeWidth: DONUT.width }),
+                  rings,
+                ),
+                h(
+                  'div',
+                  { className: 'dshtu-donut-center' },
+                  h('div', { className: 'dshtu-donut-total' }, formatCompact(total)),
+                  h('div', { className: 'dshtu-donut-unit' }, t('tokenUnit')),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'dshtu-model-list' },
+                slices.map((slice) =>
                   h(
-                    'td',
-                    { key: 'model' },
-                    h(
-                      'div',
-                      { className: 'dshtu-model' },
-                      h('span', { className: 'dshtu-model-name', title: row.model }, row.model),
-                      h(
-                        'div',
-                        { className: 'dshtu-model-meta' },
-                        row.provider ? h('span', { className: 'dshtu-badge' }, row.provider) : null,
-                        costOf(row).known
-                          ? h('span', { className: 'dshtu-badge' }, `¥${formatMoney(costOf(row).total)}`)
-                          : h('span', { className: 'dshtu-badge' }, t('unpriced')),
-                      ),
-                    ),
-                  ),
-                  ...PRICE_FIELDS.map(({ field }) =>
-                    h(
-                      'td',
-                      { key: field },
-                      h(
-                        'span',
-                        { className: 'dshtu-price-cell' },
-                        h('input', {
-                          className: 'dshtu-price-input',
-                          type: 'number',
-                          min: '0',
-                          step: '0.01',
-                          inputMode: 'decimal',
-                          placeholder: '—',
-                          'aria-label': `${row.model} ${t(field === 'input' ? 'priceInput' : field === 'output' ? 'priceOutput' : field === 'cacheRead' ? 'priceCacheRead' : 'priceCacheWrite')}`,
-                          value: draft[row.key]?.[field] ?? '',
-                          onChange: (event) => setField(row.key, field, event.target.value),
-                        }),
-                        h('span', { className: 'dshtu-price-unit' }, t('priceUnit')),
-                      ),
-                    ),
+                    'div',
+                    { className: 'dshtu-model-row', key: slice.key },
+                    h(Swatch, { index: slice.color }),
+                    h('span', { className: 'dshtu-model-name', title: slice.label }, slice.label),
+                    h('span', { className: 'dshtu-model-share' }, formatPercent(slice.share)),
+                    h('span', { className: 'dshtu-model-meta' }, `${formatCompact(slice.totalTokens)} ${t('tokenUnit')}`),
                   ),
                 ),
               ),
             ),
-          ),
-        ),
-        h(
-          'div',
-          { className: 'dshtu-actions' },
-          h(
-            'button',
-            { className: 'dshtu-btn is-primary', type: 'button', disabled: busy || !dirty, onClick: save },
-            busy ? t('saving') : t('save'),
-          ),
-          h('button', { className: 'dshtu-btn', type: 'button', disabled: busy || !dirty, onClick: clearAll }, t('resetPrices')),
-        ),
       )
     }
 
-    function ModelTable({ models }) {
-      const maxTotal = models.reduce((max, row) => (row.totalTokens > max ? row.totalTokens : max), 0)
-      const has = (key) => models.some((row) => (row[key] ?? 0) > 0)
-      const anyPriced = models.some((row) => costOf(row).known)
-      const columns = [
-        { key: 'model', label: t('model'), when: true },
-        { key: 'calls', label: t('calls'), when: true },
-        { key: 'inputTokens', label: t('input'), when: true },
-        { key: 'outputTokens', label: t('output'), when: true },
-        { key: 'cacheReadTokens', label: t('cacheRead'), when: has('cacheReadTokens') },
-        { key: 'cacheWriteTokens', label: t('cacheWrite'), when: has('cacheWriteTokens') },
-        { key: 'reasoningTokens', label: t('reasoning'), when: has('reasoningTokens') },
-        { key: 'totalTokens', label: t('total'), when: true },
-        { key: 'cost', label: t('cost'), when: anyPriced },
-      ].filter((column) => column.when)
-      return h(
-        'table',
-        { className: 'dshtu-table' },
-        h('thead', null, h('tr', null, columns.map((column) => h('th', { key: column.key }, column.label)))),
-        h(
-          'tbody',
-          null,
-          models.map((row, index) =>
-            h(
-              'tr',
-              { key: row.key ?? index },
-              columns.map((column) => {
-                if (column.key === 'model') {
-                  const share = maxTotal > 0 ? Math.max(2, (row.totalTokens / maxTotal) * 100) : 0
-                  return h(
-                    'td',
-                    { key: column.key },
-                    h(
-                      'div',
-                      { className: 'dshtu-model' },
-                      h('span', { className: 'dshtu-model-name', title: row.model }, row.model),
-                      h(
-                        'div',
-                        { className: 'dshtu-model-meta' },
-                        row.provider ? h('span', { className: 'dshtu-badge' }, row.provider) : null,
-                        h('span', { className: 'dshtu-share', title: `${t('share')} ${share.toFixed(1)}%` }, h('i', { style: { width: `${share}%` } })),
-                      ),
-                    ),
-                  )
-                }
-                if (column.key === 'cost') {
-                  const cost = costOf(row)
-                  if (!cost.known) return h('td', { key: column.key }, h('span', { className: 'dshtu-empty' }, t('unpriced')))
-                  return h(
-                    'td',
-                    { key: column.key, className: 'dshtu-money' },
-                    `¥${formatMoney(cost.total)}`,
-                    cost.partial ? h('span', { className: 'dshtu-price-unit dshtu-warn' }, '*') : null,
-                  )
-                }
-                return h('td', { key: column.key }, formatNumber(row[column.key]))
-              }),
-            ),
-          ),
-        ),
-      )
-    }
-
-    function DayTable({ days }) {
-      const has = (key) => days.some((row) => (row[key] ?? 0) > 0)
-      const columns = [
-        { key: 'day', label: t('day'), when: true },
-        { key: 'calls', label: t('calls'), when: true },
-        { key: 'inputTokens', label: t('input'), when: true },
-        { key: 'outputTokens', label: t('output'), when: true },
-        { key: 'cacheReadTokens', label: t('cacheRead'), when: has('cacheReadTokens') },
-        { key: 'totalTokens', label: t('total'), when: true },
-      ].filter((column) => column.when)
-      return h(
-        'table',
-        { className: 'dshtu-table' },
-        h('thead', null, h('tr', null, columns.map((column) => h('th', { key: column.key }, column.label)))),
-        h(
-          'tbody',
-          null,
-          days.map((row) =>
-            h(
-              'tr',
-              { key: row.day },
-              columns.map((column) => h('td', { key: column.key }, column.key === 'day' ? row.day : formatNumber(row[column.key]))),
-            ),
-          ),
-        ),
-      )
-    }
+    // ---- 页面 ----
 
     function UsageSection() {
-      const [data, setData] = React.useState(null)
+      const [range, setRange] = React.useState('7d')
+      const [lifetime, setLifetime] = React.useState(null)
+      const [ranged, setRanged] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
-      const [range, setRange] = React.useState(14)
-      const [expanded, setExpanded] = React.useState(false)
-      // 清零后的短暂反馈：Host 只改数字，页面不给点动静会让人以为「点了没反应」。
+      const [tick, setTick] = React.useState(0)
       const [flash, setFlash] = React.useState(null)
-
-      React.useEffect(() => {
-        if (flash === null) return undefined
-        const timer = setTimeout(() => setFlash(null), 2600)
-        return () => clearTimeout(timer)
-      }, [flash])
 
       const accept = (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return response.json()
       }
 
-      const load = React.useCallback(() => {
-        setBusy(true)
-        fetch(STATS_PATH, { headers: { accept: 'application/json' } })
-          .then(accept)
-          .then((payload) => {
-            setData(payload)
-            setError(null)
-          })
-          .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-          .finally(() => setBusy(false))
+      const read = React.useCallback((target) => {
+        return fetch(`${STATS_PATH}?range=${target}`, { headers: { accept: 'application/json' } }).then(accept)
       }, [])
 
       React.useEffect(() => {
-        load()
-      }, [load])
+        let cancelled = false
+        read('all')
+          .then((payload) => {
+            if (!cancelled) {
+              setLifetime(payload)
+              setError(null)
+            }
+          })
+          .catch((cause) => {
+            if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
+          })
+        return () => {
+          cancelled = true
+        }
+      }, [read, tick])
+
+      React.useEffect(() => {
+        let cancelled = false
+        setBusy(true)
+        read(range)
+          .then((payload) => {
+            if (!cancelled) {
+              setRanged(payload)
+              setError(null)
+            }
+          })
+          .catch((cause) => {
+            if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
+          })
+          .finally(() => {
+            if (!cancelled) setBusy(false)
+          })
+        return () => {
+          cancelled = true
+        }
+      }, [read, range, tick])
+
+      React.useEffect(() => {
+        if (flash === null) return undefined
+        const timer = setTimeout(() => setFlash(null), 2400)
+        return () => clearTimeout(timer)
+      }, [flash])
+
+      const refresh = () => setTick((value) => value + 1)
 
       const reset = () => {
         if (typeof window.confirm === 'function' && !window.confirm(t('confirmReset'))) return
         setBusy(true)
         fetch(RESET_PATH, { method: 'POST', headers: { accept: 'application/json' } })
           .then(accept)
-          .then((payload) => {
-            setData(payload)
-            setError(null)
-            // 明确回一句「已清零」，否则页面只是数字变 0，很像点了没反应。
+          .then(() => {
             setFlash('reset')
+            setTick((value) => value + 1)
+            setError(null)
           })
           .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
           .finally(() => setBusy(false))
       }
-
-      /** 保存单价：POST 覆盖整张表，Host 回传带新费用的完整统计。 */
-      const savePrices = React.useCallback((prices) => {
-        setBusy(true)
-        fetch(PRICES_PATH, {
-          method: 'POST',
-          headers: { accept: 'application/json', 'content-type': 'application/json' },
-          body: JSON.stringify({ prices }),
-        })
-          .then(accept)
-          .then((payload) => {
-            setData(payload)
-            setError(null)
-          })
-          .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-          .finally(() => setBusy(false))
-      }, [])
-
-      const totals = data?.totals ?? null
-      const models = Array.isArray(data?.models) ? data.models : []
-      const days = Array.isArray(data?.days) ? data.days : []
-      const calls = totals?.calls ?? 0
-      const cacheRead = totals?.cacheReadTokens ?? 0
-      const stackSum = SEGMENTS.reduce((sum, segment) => sum + (totals?.[segment.key] ?? 0), 0)
-      const hitRatio = cacheRead + (totals?.inputTokens ?? 0) > 0 ? cacheRead / (cacheRead + (totals?.inputTokens ?? 0)) : 0
-      const animatedTotal = useCountUp(totals?.totalTokens)
-      const mounted = useMounted()
-      const series = React.useMemo(() => buildSeries(days, range), [data, range])
-      const dayRows = expanded ? days : days.slice(0, 7)
 
       const head = h(
         'div',
@@ -890,171 +934,36 @@ window.__ModuleLoader__.load({
         h('h3', { className: 'dshtu-title' }, t('title')),
         h('span', { className: 'dshtu-live' }, h('i', { className: 'dshtu-dot' }), t('live')),
         h('span', { className: 'dshtu-spacer' }),
-        flash === 'reset' ? h('span', { className: 'dshtu-count dshtu-ok' }, t('resetDone')) : null,
-        h('button', { className: 'dshtu-btn', type: 'button', disabled: busy, onClick: load }, t('refresh')),
-        h('button', { className: 'dshtu-btn', type: 'button', disabled: busy, onClick: reset }, t('reset')),
+        flash === 'reset' ? h('span', { className: 'dshtu-ok' }, t('resetDone')) : null,
       )
 
-      if (data === null) {
+      const staleBanner =
+        typeof lifetime?.staleSince === 'number'
+          ? h('div', { className: 'dshtu-banner', key: 'stale' }, h('b', null, t('staleTitle')), h('span', null, t('staleHint')))
+          : null
+
+      const errorNode = error === null ? null : h('div', { className: 'dshtu-error', key: 'error' }, `${t('failed')}${error}`)
+
+      if (lifetime === null) {
         return h(
           'div',
           { className: 'dshtu-root' },
           h('style', { key: 'style' }, CSS),
           head,
-          error === null ? h('div', { className: 'dshtu-empty', key: 'loading' }, t('loading')) : h('div', { className: 'dshtu-error', key: 'error' }, `${t('failed')}${error}`),
+          staleBanner,
+          errorNode,
+          error === null ? h('div', { className: 'dshtu-empty', key: 'loading' }, t('loading')) : null,
         )
       }
 
-      // 旧代码横幅：跑的是启动时缓存的旧模块时，一切「新功能不生效」都能对上号。
-      const staleBanner =
-        typeof data.staleSince === 'number'
-          ? h(
-              'div',
-              { className: 'dshtu-banner', key: 'stale' },
-              h('b', null, t('staleTitle')),
-              h('span', null, t('staleHint')),
-            )
-          : null
-
-      const hero = h(
-        'div',
-        { className: 'dshtu-card dshtu-hero', key: 'hero' },
-        h(
-          'div',
-          { className: 'dshtu-hero-main' },
-          h('div', { className: 'dshtu-eyebrow' }, t('total')),
-          h('div', { className: 'dshtu-total' }, formatNumber(animatedTotal)),
-          h(
-            'div',
-            { className: 'dshtu-sub' },
-            h('span', null, `${t('calls')} `, h('b', null, formatNumber(calls))),
-            h('span', null, `${t('perCall')} `, h('b', null, formatNumber(calls > 0 ? (totals?.totalTokens ?? 0) / calls : 0))),
-            h('span', null, `${t('since')} `, formatTime(data.since)),
-            h('span', null, `${t('updated')} `, formatTime(data.updatedAt)),
-          ),
-        ),
-        h(CacheRing, { ratio: hitRatio, mounted }),
-      )
-
-      const legend = SEGMENTS.map((segment) =>
-        h(
-          'span',
-          { className: 'dshtu-legend-item', key: segment.key },
-          h('i', { className: `dshtu-swatch dshtu-tone-${segment.tone}` }),
-          t(segment.label),
-          h('b', null, formatNumber(totals?.[segment.key])),
-          ` · ${stackSum > 0 ? (((totals?.[segment.key] ?? 0) / stackSum) * 100).toFixed(1) : '0.0'}%`,
-        ),
-      )
-      if ((totals?.reasoningTokens ?? 0) > 0) {
-        legend.push(
-          h(
-            'span',
-            { className: 'dshtu-legend-item', key: 'reasoning' },
-            h('i', { className: 'dshtu-swatch dshtu-tone-muted' }),
-            t('reasoning'),
-            h('b', null, formatNumber(totals?.reasoningTokens)),
-          ),
-        )
-      }
-
-      const breakdown = h(
-        'div',
-        { className: 'dshtu-card', key: 'breakdown' },
-        h('div', { className: 'dshtu-section-head' }, h('h4', { className: 'dshtu-section-title' }, t('breakdown'))),
-        h(
-          'div',
-          { className: 'dshtu-stack' },
-          SEGMENTS.filter((segment) => (totals?.[segment.key] ?? 0) > 0).map((segment, index) =>
-            h('i', {
-              key: segment.key,
-              className: `dshtu-fill dshtu-tone-${segment.tone}`,
-              style: {
-                width: `${stackSum > 0 ? ((totals?.[segment.key] ?? 0) / stackSum) * 100 : 0}%`,
-                animationDelay: `${index * 60}ms`,
-              },
-            }),
-          ),
-        ),
-        h('div', { className: 'dshtu-legend' }, legend),
-      )
-
-      const trend = h(
-        'div',
-        { className: 'dshtu-card', key: 'trend' },
-        h(
-          'div',
-          { className: 'dshtu-section-head' },
-          h('h4', { className: 'dshtu-section-title' }, t('trend')),
-          h('span', { className: 'dshtu-spacer' }),
-          h(
-            'span',
-            { className: 'dshtu-seg' },
-            [7, 14, 30].map((option) =>
-              h(
-                'button',
-                {
-                  key: option,
-                  type: 'button',
-                  className: `dshtu-btn${option === range ? ' is-on' : ''}`,
-                  onClick: () => setRange(option),
-                },
-                `${option}${t('dayUnit')}`,
-              ),
-            ),
-          ),
-        ),
-        h(TrendChart, { series, range }),
-      )
-
-      const modelCard = h(
-        'div',
-        { className: 'dshtu-card', key: 'models' },
-        h(
-          'div',
-          { className: 'dshtu-section-head' },
-          h('h4', { className: 'dshtu-section-title' }, t('byModel')),
-          h('span', { className: 'dshtu-count' }, `${models.length}`),
-        ),
-        models.length === 0 ? h('div', { className: 'dshtu-empty' }, t('empty')) : h('div', { className: 'dshtu-table-wrap' }, h(ModelTable, { models })),
-      )
-
-      const costCard = models.length === 0 ? null : h(CostCard, { key: 'cost', data, models })
-
-      const priceCard = h(PriceEditor, {
-        key: 'prices',
-        models,
-        prices: data.prices ?? {},
-        onSave: savePrices,
-        busy,
-        savedAt: data.pricesUpdatedAt ?? 0,
-      })
-
-      const dayCard = h(
-        'div',
-        { className: 'dshtu-card', key: 'days' },
-        h(
-          'div',
-          { className: 'dshtu-section-head' },
-          h('h4', { className: 'dshtu-section-title' }, t('byDay')),
-          h('span', { className: 'dshtu-count' }, `${days.length}`),
-          h('span', { className: 'dshtu-spacer' }),
-          days.length > 7
-            ? h('button', { className: 'dshtu-btn', type: 'button', onClick: () => setExpanded((value) => !value) }, expanded ? t('collapse') : t('expand'))
-            : null,
-        ),
-        days.length === 0 ? h('div', { className: 'dshtu-empty' }, t('empty')) : h('div', { className: 'dshtu-table-wrap' }, h(DayTable, { days: dayRows })),
-      )
-
-      // 数据兜底提示：只在真的触发过时出现，平时不占地方。
-      // 三件事都可能让用户以为「数据丢了」，这里明确告诉他数据在哪、能不能救回。
-      const recoverNotices = [
-        data.corruptBackup ? h('div', { className: 'dshtu-note dshtu-warn', key: 'corrupt' }, `${t('corruptBackup')} ${data.corruptBackup}`) : null,
-        data.restoredFrom ? h('div', { className: 'dshtu-note dshtu-ok', key: 'restored' }, `${t('restoredFrom')} ${data.restoredFrom}`) : null,
-        data.resetBackup ? h('div', { className: 'dshtu-note', key: 'resetsnap' }, `${t('resetBackup')} ${data.resetBackup}`) : null,
+      const notices = [
+        lifetime.corruptBackup ? h('div', { className: 'dshtu-note is-warn', key: 'corrupt' }, `${t('corruptBackup')} ${lifetime.corruptBackup}`) : null,
+        lifetime.restoredFrom ? h('div', { className: 'dshtu-note is-ok', key: 'restored' }, `${t('restoredFrom')} ${lifetime.restoredFrom}`) : null,
+        lifetime.resetBackup ? h('div', { className: 'dshtu-note', key: 'reset' }, `${t('resetBackup')} ${lifetime.resetBackup}`) : null,
       ].filter(Boolean)
 
-      const foot = h('div', { className: 'dshtu-foot', key: 'foot' }, `${t('file')}：${data.file ?? '—'}`)
+      const empty = (lifetime.summary?.totalTokens ?? 0) <= 0
+      const rangeTabs = RANGE_OPTIONS.map((option) => ({ key: option, label: t(option === '7d' ? 'range7d' : 'range30d') }))
 
       return h(
         'div',
@@ -1062,16 +971,29 @@ window.__ModuleLoader__.load({
         h('style', { key: 'style' }, CSS),
         head,
         staleBanner,
-        error === null ? null : h('div', { className: 'dshtu-error', key: 'error' }, `${t('failed')}${error}`),
-        hero,
-        costCard,
-        breakdown,
-        trend,
-        modelCard,
-        priceCard,
-        dayCard,
-        ...recoverNotices,
-        foot,
+        errorNode,
+        h(LifetimeStrip, { key: 'strip', summary: lifetime.summary ?? null }),
+        empty ? null : h(HeatmapCard, { key: 'heatmap', heatmap: lifetime.heatmap }),
+        h(
+          'div',
+          { className: 'dshtu-range-row', key: 'range' },
+          h('span', { className: 'dshtu-range-title' }, t('rangeTitle')),
+          h(Tabs, { options: rangeTabs, value: range, onChange: (value) => setRange(value) }),
+        ),
+        h(TrendCard, { key: 'trend', snapshot: ranged ?? lifetime }),
+        h(ModelCard, { key: 'models', snapshot: ranged ?? lifetime }),
+        h(
+          'div',
+          { className: 'dshtu-actions', key: 'actions' },
+          h('button', { className: 'dshtu-btn', type: 'button', disabled: busy, onClick: reset }, t('reset')),
+          h('button', { className: 'dshtu-btn is-primary', type: 'button', disabled: busy, onClick: refresh }, t('refresh')),
+        ),
+        ...notices,
+        h(
+          'div',
+          { className: 'dshtu-foot', key: 'foot' },
+          `${t('file')}：${lifetime.file ?? '—'} · ${t('since')} ${formatStamp(lifetime.since)} · ${t('updated')} ${formatStamp(lifetime.updatedAt)} · ${t('build')} ${lifetime.build ?? '—'}`,
+        ),
       )
     }
 

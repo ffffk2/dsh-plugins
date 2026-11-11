@@ -1,0 +1,39 @@
+{
+  "name": "@local/dsh-sysmon",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "左下角常驻显示 CPU 与内存占用，悬停查看各自占用最高的 5 个进程；每 10 秒刷新一次。",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "系统资源",
+    "description": "左下角常驻显示 CPU 与内存占用，悬停查看各自占用最高的 5 个进程；每 10 秒刷新一次。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  }
+}

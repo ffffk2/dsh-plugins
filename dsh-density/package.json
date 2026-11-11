@@ -1,0 +1,41 @@
+{
+  "name": "@local/dsh-density",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "收紧 DSH 左侧工作区列表与会话正文的行高/间距，并给每个工作区分配可配置的背景色；字号仍与官方设置同步",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "界面密度与配色",
+    "description": "收紧左侧工作区列表与会话正文的行高/间距，并给每个工作区分配可配置的背景色；字号仍由官方设置控制。"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Token Usage",
-    "description": "Accumulate model token usage globally, by model, and by day — plus cost estimates once you set prices."
+    "description": "Total tokens, peak day, streaks and longest session — plus a 52-week activity heatmap, 7/30-day multi-model trend and model share."
   }
 }

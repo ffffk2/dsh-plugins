@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="System resource monitor">
+  <rect x="4" y="4" width="56" height="56" rx="15" fill="#121216" />
+  <circle cx="32" cy="33" r="17" fill="none" stroke="#2b2b31" stroke-width="5" />
+  <path d="M32 16a17 17 0 0 1 14.7 25.5" fill="none" stroke="#6f9bff" stroke-width="5" stroke-linecap="round" />
+  <rect x="23" y="33" width="5" height="8" rx="2" fill="#f4f5f7" />
+  <rect x="30" y="28" width="5" height="13" rx="2" fill="#f4f5f7" />
+  <rect x="37" y="24" width="5" height="17" rx="2" fill="#6f9bff" />
+</svg>

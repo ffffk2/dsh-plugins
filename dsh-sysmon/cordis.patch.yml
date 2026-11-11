@@ -1,0 +1,6 @@
+# 系统资源 bundle 的 patch 层：插入本包唯一的 Host 行。
+# Client 模块由 dsh-client-modules 扫描 Host Loader 的条目发现，
+# 没有这一行，window.__ModuleLoader__ 那一半不会被加载。
+- insert:
+    - id: sysmon
+      name: '@local/dsh-sysmon'

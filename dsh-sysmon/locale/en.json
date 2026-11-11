@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "System resources",
+    "description": "A bottom-left HUD showing CPU and memory usage, with a hover card listing the top five processes for each; refreshes every 10 seconds."
+  }
+}

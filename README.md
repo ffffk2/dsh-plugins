@@ -6,10 +6,12 @@ DSH（DeepSeek Harness）插件集合。每个插件都是独立的 npm 包，�
 | 插件 | 作用 | 入口 |
 |---|---|---|
 | [dsh-theme-colors](dsh-theme-colors) | 用取色器自定义深色与浅色两套配色，内置 15 套护眼预设，改动立即生效 | 设置 → 外观颜色 |
-| [dsh-token-usage](dsh-token-usage) | 累计记录每次模型调用的 token 用量（全局 / 按模型 / 按天），可设置单价估算费用 | 设置 → Token 统计 |
+| [dsh-density](dsh-density) | 收紧左侧工作区列表与会话正文的行高/间距，并给每个工作区分组分配可配置的底色（目录深、会话浅）；字号仍与官方设置同步 | 设置 → 排版密度 / 工作区配色 |
+| [dsh-token-usage](dsh-token-usage) | 对齐 ZCode Usage 页：累计/峰值/连续天数/最长会话、52 周热力图、近 7/30 日多模型趋势与模型占比 | 设置 → Token 统计 |
 | [dsh-open-with](dsh-open-with) | 会话头部的「打开方式」：用 IDE、cmd / PowerShell 或任意配置的应用打开当前工作区 | 会话头部按钮 |
 | [dsh-git-pr](dsh-git-pr) | 斜杠命令 `/commit`、`/create-pr`、`/commit-pr`：把「提交代码 / 开个 PR」的操作规程交给模型按现场执行 | 输入框发送命令 |
 | [dsh-git](dsh-git) | 右侧栏的可视化 Git 面板：更改、暂存、差异、提交、历史、分支与远端 | 右侧栏 tab |
+| [dsh-sysmon](dsh-sysmon) | 左下角常驻 CPU / 内存占用 HUD，悬停查看各自占用最高的 5 个进程，每 10 秒刷新 | 左下角浮层 |
 
 ## 安装
 
@@ -51,16 +53,18 @@ README.md         该插件的详细说明
 
 ```powershell
 node dsh-theme-colors\smoke.mjs
+node dsh-density\smoke.mjs
 node dsh-token-usage\smoke.mjs
 node dsh-open-with\smoke.mjs
 node dsh-open-with\smoke-routes.mjs
 node dsh-git\smoke.mjs
 node dsh-git-pr\smoke.mjs
+node dsh-sysmon\smoke.mjs
 ```
 
 用极简 React 在 Node 里跑一遍注册契约、状态清洗与渲染，全 PASS 才算接线正确。
 `dsh-git-pr` 是纯 Host 插件（斜杠命令），它的冒烟测试断言注册契约、**指令里是否带全硬性约定**
-（不许 force、先扫描再 add、不编造验证结果）以及指令是否真的排进了会话。
+（不许 force、提交前不额外 review、不编造验证结果）以及指令是否真的排进了会话。
 
 ## 许可
 

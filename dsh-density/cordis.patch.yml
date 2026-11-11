@@ -1,0 +1,7 @@
+# 排版密度 bundle 的 patch 层：插入本包唯一的 Host 行。
+# Client 模块是从 Host Loader 的条目扫描出来的，所以必须有这一行，
+# 设置页（设置 → 排版密度）才会被 Web 端加载。
+# 本插件不需要 config：排版偏好存在浏览器 localStorage 里。
+- insert:
+    - id: density
+      name: '@local/dsh-density'
